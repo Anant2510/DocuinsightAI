@@ -157,3 +157,4 @@ basis:
     evidence.income: [Income verification against independent evidence, Mortgage Credit Directive article 20]
     evidence.statement: [Income verification against independent evidence, Mortgage Credit Directive article 20]
     evidence.employment: [Employment verification]
+    integrity.payslip_arithmetic: [Recalculation of stated totals, Income verification against independent evidence]

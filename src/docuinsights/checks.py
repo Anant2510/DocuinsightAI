@@ -45,13 +45,27 @@ def evidence(case: dict[str, Any], profile: Profile) -> dict[str, Any]:
         mentions = [d for d in docs if any(p.lower() in (d["versions"][d["current"] - 1].get("text") or "").lower() for p in phrases)]
         steps.append("Searched the text of every document for " + ", ".join(f"'{p}'" for p in phrases) + ": "
                      + (", ".join(f"mentioned in {d['name']} ({profile.type_name(doc_type(d))}), which refers to it but is not one" for d in mentions) if mentions else "not found") + ".")
+        unread = [d for d in docs if not (d["versions"][d["current"] - 1].get("text") or "").strip()]   # a file nobody could read may be the very document
+        labelled = [d for d in unread if d.get("category") in ev["any_of"]]
         for d in docs:
-            if d.get("category") in ev["any_of"]:
+            if d in unread:
+                steps.append(f"{d['name']} could not be read ({d['versions'][d['current'] - 1].get('note') or 'no text in it'})"
+                             + (f"; it was uploaded under '{profile.type_name(d['category'])}'." if d in labelled else "."))
+            elif d.get("category") in ev["any_of"]:
                 steps.append(f"{d['name']} was uploaded under '{profile.type_name(d['category'])}' but reads as {profile.type_name(doc_type(d))}.")
         if applies:
             steps.append(f"Conclusion: {ev['title']} is missing. {ev.get('note') or ''}".strip())
-            out.append(finding(f"EV-{ev['id']}", "evidence", ev["title"], "missing", f"{names} not provided", agent="evidence", severity="high", reasoning=steps,
-                               path=["case"], rule=rule, data={"requirement": ev["id"], "applies": True, "request": f"{names} for this {profile.brand.get('case_noun', 'case')}"}))
+            noun = profile.brand.get("case_noun", "case")
+            if labelled:
+                files = ", ".join(d["name"] for d in labelled)
+                message, request = f"{names} not provided in a form that can be read: {files} was uploaded as one, and could not be read", f"{names} for this {noun}: a readable copy ({files} could not be read)"
+            elif unread:
+                files = ", ".join(d["name"] for d in unread[:3])
+                message, request = f"{names} not provided; {files} could not be read and may be it", f"{names} for this {noun} (or a readable copy of {files})"
+            else:
+                message, request = f"{names} not provided", f"{names} for this {noun}"
+            out.append(finding(f"EV-{ev['id']}", "evidence", ev["title"], "missing", message, agent="evidence", severity="high", reasoning=steps,
+                               path=["case"], rule=rule, data={"requirement": ev["id"], "applies": True, "request": request}))
         else:
             steps.append("Conclusion: not required for this case.")
             out.append(finding(f"EV-{ev['id']}", "evidence", ev["title"], "info", f"{names} not provided and not required for this case", agent="evidence", severity="low",
@@ -288,13 +302,16 @@ def known(case: dict[str, Any], profile: Profile, recall: dict[str, Any]) -> lis
     """What the workspace's memory holds that touches this case, as findings. A reference number another case already quotes is
     information by default; a use case that lists the reference under `memory.duplicates` sends it to a person (a deterministic
     comparison, never a model's judgement)."""
+    from .assurance import mask   # a bank account the workspace remembers is named without spelling it out
+
     strict = {str(k).lower() for k in ((profile.raw.get("memory") or {}).get("duplicates") or [])}
     out = []
     for n, i in enumerate(recall.get("identifiers") or [], start=1):
         review = i["type"].lower() in strict
         where = ", ".join(f"{c['case']} ({c.get('label') or 'assessed'})" for c in i["cases"])
-        out.append(finding(f"MEM-reference-{n}", "memory", f"{i['type']} {i['value']} is already known", "review" if review else "info",
-                           f"{i['type']} {i['value']} is also quoted in {i['count']} other case(s): {where}." + (" The same reference in two cases needs a person to confirm it is not a duplicate." if review else ""),
+        shown = mask(i["value"])
+        out.append(finding(f"MEM-reference-{n}", "memory", f"{i['type']} {shown} is already known", "review" if review else "info",
+                           f"{i['type']} {shown} is also quoted in {i['count']} other case(s): {where}." + (" The same reference in two cases needs a person to confirm it is not a duplicate." if review else ""),
                            agent="resolve", severity="high" if review else "low", requires_human=review,
                            reasoning=[f"The workspace's memory holds one episode per assessed case; {recall.get('episodes_searched', 0)} were searched.",
                                       f"{i['type']} references are compared after removing spaces and punctuation.", f"Found in: {where}."], data={"memory": i}))

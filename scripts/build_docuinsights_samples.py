@@ -163,6 +163,12 @@ def trade_finance() -> None:
         ("Notify Party", applicant), ("Vessel / Voyage", "MV Bay Meridian / 044W"), ("Port of Loading", "Chennai, India"), ("Port of Discharge", "Felixstowe, United Kingdom"),
         ("Container No", "COLU 482913-6"), ("No. of Packages", "215 cartons"), ("Gross Weight", "6,880.0 kg"),
         ("Description of Goods", "215 cartons cotton woven bed linen sets"), ("Shipped on Board", "24 October 2026"), ("Freight", "Prepaid")])
+    # the same shipment under a carrier and a vessel that match the invented demonstration watchlist (the carrier through a different spelling)
+    pdf(out / "bill_of_lading_listed.pdf", "Quelmar Shipping Line", "BILL OF LADING", [
+        ("B/L No", "QSL-CHE-FXT-261107"), ("Carrier", "Quelmar Shipping Line Ltd, Harbour Road, Chennai, India"), ("Shipper", beneficiary), ("Consignee", "To the order of Wessex Commercial Bank"),
+        ("Notify Party", applicant), ("Vessel / Voyage", "MV Tiberon Star / 117W"), ("Port of Loading", "Chennai, India"), ("Port of Discharge", "Felixstowe, United Kingdom"),
+        ("Container No", "QSLU 771204-3"), ("No. of Packages", "215 cartons"), ("Gross Weight", "6,880.0 kg"),
+        ("Description of Goods", "215 cartons cotton woven bed linen sets"), ("Shipped on Board", "24 October 2026"), ("Freight", "Prepaid")])
     pdf(out / "packing_list.pdf", "Sundara Weaves Exports Pvt Ltd", "PACKING LIST", [
         ("Packing List No", "SWE/PL/0458"), ("Invoice No", "SWE/26-27/0458"), ("Shipper", beneficiary), ("Consignee", applicant), "",
         ("Description of Goods", "Cotton woven bed linen sets, 300 thread count"), ("Total Packages", "215 cartons"), ("Total Quantity", "4,300 sets"),
@@ -179,6 +185,8 @@ def supplier_invoice() -> None:
     buyer = "Calder Vale Foods Ltd, 4 Riverside Park, Halifax HX3 6TR, United Kingdom"
     supplier = "Penrose Packaging Supplies Ltd, Unit 12 Tannery Court, Leeds LS10 2RU, United Kingdom"
     cartons = "Corrugated shipping cartons, double wall, 400 x 300 x 250 mm, printed"
+    account = ("Bank Account (IBAN)", "GB55 PENR 2041 5500 7731 94")   # invented; the check digits are right
+    contact = ("Accounts Contact", "accounts@penrose-packaging.example, tel: +44 113 496 0142")   # a reserved example domain and a number from a range kept for drama
     pdf(out / "purchase_order.pdf", "Calder Vale Foods Ltd - Procurement", "PURCHASE ORDER", [
         ("PO Number", "PO-2026-08821"), ("Order Date", "14 September 2026"), ("Buyer", buyer), ("Supplier", supplier), ("Ordered By", "Packaging buyer, Halifax site"), "",
         ("Goods Ordered", cartons), ("Quantity Ordered", "2,400 cartons"), ("Unit Price", "GBP 7.60"), ("Order Total", "GBP 18,240.00"),
@@ -186,7 +194,7 @@ def supplier_invoice() -> None:
     pdf(out / "invoice.pdf", "Penrose Packaging Supplies Ltd", "TAX INVOICE", [
         ("Invoice Number", "PPS-104471"), ("Invoice Date", "9 October 2026"), ("Supplier", supplier), ("Bill To", buyer), ("PO Reference", "PO-2026-08821"), "",
         ("Goods Supplied", cartons), ("Quantity Invoiced", "2,400 cartons"), ("Unit Price", "GBP 7.60"), ("Invoice Total", "GBP 18,240.00"),
-        ("Tax", "Included at the standard rate"), ("Payment Due", "8 November 2026")])
+        ("Tax", "Included at the standard rate"), ("Payment Due", "8 November 2026"), account, contact])
     pdf(out / "goods_received_note.pdf", "Calder Vale Foods Ltd - Goods-in", "GOODS RECEIVED NOTE", [
         ("GRN Number", "GRN-55102"), ("PO Reference", "PO-2026-08821"), ("Received Date", "6 October 2026"), ("Supplier", supplier), ("Received At", buyer), "",
         ("Goods Received", "Corrugated shipping cartons, double wall, printed"), ("Quantity Received", "2,400 cartons"), ("Condition on Receipt", "Good; 12 pallets, wrapping intact"),
@@ -202,10 +210,25 @@ def supplier_invoice() -> None:
     pdf(out / "invoice_over.pdf", "Penrose Packaging Supplies Ltd", "TAX INVOICE", [
         ("Invoice Number", "PPS-104539"), ("Invoice Date", "28 October 2026"), ("Supplier", supplier), ("Bill To", buyer), ("PO Reference", "PO-2026-08907"), "",
         ("Goods Supplied", film), ("Quantity Invoiced", "2,000 rolls"), ("Unit Price", "GBP 6.40"), ("Invoice Total", "GBP 12,800.00"),
-        ("Tax", "Included at the standard rate"), ("Payment Due", "27 November 2026")])
+        ("Tax", "Included at the standard rate"), ("Payment Due", "27 November 2026"), account, contact])
     pdf(out / "goods_received_note_short.pdf", "Calder Vale Foods Ltd - Goods-in", "GOODS RECEIVED NOTE", [
         ("GRN Number", "GRN-55190"), ("PO Reference", "PO-2026-08907"), ("Received Date", "26 October 2026"), ("Supplier", supplier.replace("Ltd", "Limited")), ("Received At", buyer), "",
         ("Goods Received", "Stretch wrap film, 500 mm, clear"), ("Quantity Received", "1,650 rolls"), ("Condition on Receipt", "Good; one pallet short against the delivery paperwork"),
+        ("Checked By", "Goods-in supervisor")])
+    # a third transaction: within tolerance of its order, but the invoice's own figures do not add up and it names an account the supplier has not used before
+    labels = "Pallet labels, thermal, 100 x 150 mm, rolls of 500"
+    pdf(out / "purchase_order_c.pdf", "Calder Vale Foods Ltd - Procurement", "PURCHASE ORDER", [
+        ("PO Number", "PO-2026-09114"), ("Order Date", "3 November 2026"), ("Buyer", buyer), ("Supplier", supplier), ("Ordered By", "Packaging buyer, Halifax site"), "",
+        ("Goods Ordered", labels), ("Quantity Ordered", "600 rolls"), ("Unit Price", "GBP 9.50"), ("Order Total", "GBP 5,700.00"),
+        ("Deliver To", "Goods-in, 4 Riverside Park, Halifax"), ("Required By", "16 November 2026"), ("Payment Terms", "30 days from the invoice date")])
+    pdf(out / "invoice_new_account.pdf", "Penrose Packaging Supplies Ltd", "TAX INVOICE", [
+        ("Invoice Number", "PPS-104688"), ("Invoice Date", "17 November 2026"), ("Supplier", supplier), ("Bill To", buyer), ("PO Reference", "PO-2026-09114"), "",
+        ("Goods Supplied", labels), ("Quantity Invoiced", "600 rolls"), ("Unit Price", "GBP 9.50"), ("Invoice Total", "GBP 5,790.00"),
+        ("Tax", "Included at the standard rate"), ("Payment Due", "17 December 2026"), ("Bank Account (IBAN)", "GB65 QLMR 6092 2144 0877 31"),
+        "Please note that our bank details have changed. Use the account above for this and all future payments.", contact])
+    pdf(out / "goods_received_note_c.pdf", "Calder Vale Foods Ltd - Goods-in", "GOODS RECEIVED NOTE", [
+        ("GRN Number", "GRN-55307"), ("PO Reference", "PO-2026-09114"), ("Received Date", "14 November 2026"), ("Supplier", supplier), ("Received At", buyer), "",
+        ("Goods Received", "Pallet labels, thermal, 100 x 150 mm"), ("Quantity Received", "600 rolls"), ("Condition on Receipt", "Good; two cartons, seals intact"),
         ("Checked By", "Goods-in supervisor")])
 
 

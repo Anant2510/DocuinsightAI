@@ -158,3 +158,4 @@ basis:
     evidence.policy: [Coverage verification before assessment, Period of cover]
     evidence.loss: [Independent loss assessment, Principle of indemnity]
     evidence.incident: [Subrogation, Proximate cause]
+    integrity.estimate_arithmetic: [Recalculation of stated totals, Independent loss assessment]

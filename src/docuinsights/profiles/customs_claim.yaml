@@ -297,6 +297,27 @@ consistency:
   - {id: origin, family: commodity, title: Country of origin agrees, kind: text, severity: medium,
      fields: [commercial_invoice.origin, declaration.origin]}
 
+# What the integrity agent is told about this use case. Each line is a deterministic check; none is a model's opinion.
+integrity:
+  sums:
+    - {id: invoice_goods_value, title: The invoice's quantity and unit value give the goods value, kind: product, parts: [commercial_invoice.quantity, commercial_invoice.unit_value], equals: commercial_invoice.goods_value}
+    - {id: invoice_total, title: Goods value and freight give the invoice total, kind: sum, parts: [commercial_invoice.goods_value, commercial_invoice.freight], equals: commercial_invoice.total}
+  issued: [commercial_invoice.invoice_date, declaration.acceptance_date, air_waybill.execution_date, bill_of_lading.shipped_date, bank_statement.transaction_date]
+
+# Every party is screened, and so is the vessel a bill of lading names.
+screening:
+  fields:
+    - {field: bill_of_lading.vessel, kind: vessel}
+
+# The service target is ILLUSTRATIVE.
+service:
+  target_days: 30
+  clock: calendar
+  starts: case.received_date
+  value: case.claimed_amount
+  high_value: 10000
+  note: Illustrative. Thirty days from receipt of the claim; a claim of 10,000 or more is high value.
+
 outcomes:
   proceed: {label: Decision-ready, description: "Required evidence is present, the rules pass and no unresolved contradiction remains."}
   request_evidence: {label: Request evidence, description: Required evidence is missing or a classification cannot be supported without more product detail.}

@@ -87,6 +87,21 @@ class Episodes:
         return {"parties": parties, "identifiers": identifiers, "episodes_searched": len(others)}
 
 
+    def seen_with(self, case: dict[str, Any], party_key: str, id_type: str) -> list[dict[str, Any]]:
+        """The reference numbers of one kind (a bank account, say) that earlier cases quoted when this party was in them, oldest first.
+        Copies of the same bundled sample are left out, as in `recall`."""
+        sample = (case.get("sample") or {}).get("id")
+        out = []
+        for e in self.all():
+            if e.get("case") == case["reference"] or (sample and e.get("sample") == sample and e.get("profile") == case.get("profile")):
+                continue
+            if party_key and any(p.get("key") == party_key for p in e.get("parties") or []):
+                trusted = e.get("decision") == "approve" or (e.get("outcome") == "proceed" and e.get("decision") in (None, "approve"))   # went through clean, or a person approved it
+                out += [{"case": e["case"], "at": e.get("at"), "value": i.get("value"), "key": i.get("key"), "trusted": trusted, "outcome": e.get("outcome"), "decision": e.get("decision")}
+                        for i in e.get("identifiers") or [] if i.get("type") == id_type and i.get("key")]
+        return out
+
+
 class MemoryHandle:
     """Memory as one agent may use it in one run. The contract says which scopes it may read and write."""
 
@@ -117,6 +132,10 @@ class MemoryHandle:
         if self.episodes is None:
             return {"parties": [], "identifiers": [], "episodes_searched": 0}
         return self.episodes.recall(case, entities)
+
+    def earlier(self, case: dict[str, Any], party_key: str, id_type: str) -> list[dict[str, Any]]:
+        self._check("read", "workspace", f"episodes:{id_type}")
+        return self.episodes.seen_with(case, party_key, id_type) if self.episodes is not None else []
 
     def summary(self) -> dict[str, Any]:
         return {"reads": [f"{x['scope']}:{x['key']}" for x in self.log if x["mode"] == "read" and x["allowed"]], "writes": [f"{x['scope']}:{x['key']}" for x in self.log if x["mode"] == "write" and x["allowed"]],

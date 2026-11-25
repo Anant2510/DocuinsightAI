@@ -169,3 +169,5 @@ basis:
     evidence.payment: [WTO Customs Valuation Agreement Article 1]
     evidence.packing: [Union Customs Code article 51]
     evidence.product: [Harmonized System General Rule 1]
+    integrity.invoice_goods_value: [Recalculation of stated totals, Customs value]
+    integrity.invoice_total: [Recalculation of stated totals, Customs value]

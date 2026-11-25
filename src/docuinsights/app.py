@@ -27,22 +27,27 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import logging
 import mimetypes
 import os
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import unquote
 
 from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 
 from . import PRODUCT, __version__
+from .assurance import due_state
 from .profiles import ProfileError
 from .service import Service, ServiceError
-from .store import StoreError
+from .store import StoreError, safe
 
+log = logging.getLogger("docuinsights")
 WEB = Path(__file__).resolve().parent / "web"
 LOOPBACK = ("127.0.0.1", "::1", "localhost", "testclient")
 PROXIED = ("x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "forwarded", "x-real-ip", "x-original-url", "x-arr-log-id", "via")   # headers a reverse proxy adds
@@ -52,6 +57,7 @@ MAX_BODY = 60 * 1024 * 1024
 def view(case: dict[str, Any]) -> dict[str, Any]:
     """The case as the workbench gets it: without the working state and the bundled transcriptions."""
     out = {k: v for k, v in case.items() if k not in ("working", "aliases")}
+    out["due"] = due_state((case.get("assessment") or {}).get("triage")) if not case.get("decision") else {}
     out["documents"] = [{**d, "versions": [{k: v for k, v in ver.items() if k != "sidecar"} for ver in d["versions"]]} for d in case["documents"]]
     w = case.get("working")
     if w:   # an assessment in flight: what each finished stage reported, for the orchestration monitor
@@ -71,7 +77,9 @@ def result(case: dict[str, Any]) -> dict[str, Any]:
                           for d in case["documents"] if not d.get("removed")],
             "findings": [{**{k: f.get(k) for k in ("id", "family", "title", "status", "severity", "message", "requires_human")},
                           "basis": [{k: b.get(k) for k in ("id", "name", "of", "citation")} for b in f.get("basis") or []]} for f in a.get("findings") or []],
-            "decision": case.get("decision"), "filed": case.get("filed")}
+            "triage": a.get("triage"), "screening": {k: (a.get("screening") or {}).get(k) for k in ("lists", "hits")} if a.get("screening") else None,
+            "personal_data": [{k: c.get(k) for k in ("id", "name", "count")} for c in (a.get("privacy") or {}).get("categories") or []],
+            "assigned": case.get("assigned"), "decision": case.get("decision"), "filed": case.get("filed")}
 
 
 def create_app(service: Service | None = None, *, tenant_of: Callable[[Request], str] | None = None, actor_of: Callable[[Request], str] | None = None,
@@ -79,7 +87,7 @@ def create_app(service: Service | None = None, *, tenant_of: Callable[[Request],
     svc = service or Service()
     api_key = os.environ.get("DOCUINSIGHTS_API_KEY") or ""
     tenant = tenant_of or (lambda r: "default")
-    actor = actor_of or (lambda r: r.headers.get("x-docuinsights-user", "")[:60] or "caseworker")
+    actor = actor_of or (lambda r: " ".join(unquote(r.headers.get("x-docuinsights-user", "")).split())[:60] or "caseworker")   # a label for the audit trail, not a sign-in
 
     def base(request: Request) -> str:
         return (request.scope.get("root_path") or "").rstrip("/")
@@ -138,6 +146,11 @@ def create_app(service: Service | None = None, *, tenant_of: Callable[[Request],
                 return JSONResponse({"detail": str(exc)}, status_code=400)
             except KeyError as exc:
                 return JSONResponse({"detail": str(exc.args[0]) if exc.args else "not found"}, status_code=404)
+            except (ValueError, TypeError, AttributeError, IndexError) as exc:   # a value of the wrong kind in the request (limit=abc, a list where an object is expected)
+                return JSONResponse({"detail": f"the request could not be read: {str(exc)[:200] or type(exc).__name__}"}, status_code=400)
+            except Exception as exc:   # anything else is ours: say so plainly, keep the detail in the server's log
+                log.exception("unhandled error on %s %s", request.method, request.url.path)
+                return JSONResponse({"detail": f"the server could not do that ({type(exc).__name__}). The detail is in the server's log."}, status_code=500)
         return endpoint
 
     T, A = tenant, actor
@@ -174,20 +187,29 @@ def create_app(service: Service | None = None, *, tenant_of: Callable[[Request],
 
     def file(r: Request) -> Response:
         v = r.query_params.get("v")
-        data, name = svc.file_bytes(T(r), ref(r), r.path_params["doc"], int(v) if v and v.isdigit() else None)
+        if v is not None and not (v.isdigit() and int(v) > 0):
+            raise ServiceError("v is the number of a version: 1, 2, ...")
+        data, name = svc.file_bytes(T(r), ref(r), r.path_params["doc"], int(v) if v else None)
         mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
         return Response(data, media_type=mime, headers={"content-disposition": f'inline; filename="{name}"', "x-content-type-options": "nosniff",
                                                         "content-security-policy": "sandbox"})
 
     # the integration surface: submit a package, optionally wait for the assessment, read the result
     def v1_submit(r: Request, d: dict[str, Any]) -> Any:
-        reference = str(d.get("reference") or "")
+        reference = safe(str(d.get("reference") or ""), "case reference")
+        fetched: list[dict[str, Any]] = []
+        if d.get("source") == "repository":   # read the package from the repository before anything is registered: a package that is not there registers nothing
+            from .repository import RepositoryError
+
+            repo = svc.repository.for_tenant(T(r)) if hasattr(svc.repository, "for_tenant") else svc.repository
+            try:
+                fetched = list(repo.fetch_case(reference))
+            except RepositoryError as exc:
+                raise ServiceError(f"the repository could not give the package of '{reference}': {exc}", 404 if "holds no case" in str(exc) else 502) from exc
         if not svc.store.exists(T(r), reference):
             svc.create_case(T(r), reference, d.get("profile"), d.get("fields") or {}, by=A(r))
-        if d.get("source") == "repository":
-            repo = svc.repository.for_tenant(T(r)) if hasattr(svc.repository, "for_tenant") else svc.repository
-            for doc in repo.fetch_case(reference):
-                svc.add_document(T(r), reference, doc["name"], doc["data"], category=doc.get("category", ""), by=A(r))
+        for doc in fetched:
+            svc.add_document(T(r), reference, doc["name"], doc["data"], category=doc.get("category", ""), by=A(r))
         add_documents(r, reference, d.get("documents") or [])
         if d.get("wait", True):
             return result(svc.assess(T(r), reference, by=A(r))), 200
@@ -227,6 +249,15 @@ def create_app(service: Service | None = None, *, tenant_of: Callable[[Request],
 
         return svc.knowledge(T(r)).rebuild(list(load_profiles().values()))
 
+    def record(r: Request) -> Response:
+        masked = (r.query_params.get("mask") or "").lower() in ("1", "true", "yes")
+        return HTMLResponse(svc.record(T(r), ref(r), masked=masked, by=A(r)), headers={"cache-control": "no-store", "x-content-type-options": "nosniff",
+                                                                                         "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"})
+
+    def cases_csv(r: Request) -> Response:
+        return Response(svc.cases_csv(T(r)), media_type="text/csv; charset=utf-8", headers={"content-disposition": 'attachment; filename="docuinsights-cases.csv"', "x-content-type-options": "nosniff",
+                                                                                           "cache-control": "no-store"})
+
     def page(request: Request) -> HTMLResponse:
         html = (WEB / "index.html").read_text(encoding="utf-8").replace("{{BASE}}", base(request)).replace("{{VERSION}}", __version__).replace("{{AUTH}}", "key" if auth == "key" else "host")
         return HTMLResponse(html, headers={"cache-control": "no-cache"})
@@ -258,6 +289,10 @@ def create_app(service: Service | None = None, *, tenant_of: Callable[[Request],
         Route("/api/cases/{ref}/correspondence", api(lambda r, d: svc.correspondence(T(r), ref(r), str(d.get("kind") or "evidence_request")), body=True), methods=["POST"]),
         Route("/api/cases/{ref}/ask", api(lambda r, d: svc.ask(T(r), ref(r), str(d.get("question") or "")), body=True), methods=["POST"]),
         Route("/api/cases/{ref}/file", api(lambda r, d: svc.file_case(T(r), ref(r), by=A(r)), body=True), methods=["POST"]),
+        Route("/api/cases/{ref}/assign", api(lambda r, d: view(svc.assign(T(r), ref(r), str(d.get("to") or ""), by=A(r))), body=True), methods=["POST"]),
+        Route("/api/cases/{ref}/record", api(record)),
+        Route("/api/insights", api(lambda r: svc.insights(T(r)))),
+        Route("/api/export/cases.csv", api(cases_csv)),
         Route("/api/feedback/{profile}", api(lambda r: svc.feedback(T(r), r.path_params["profile"]))),
         Route("/api/feedback/{profile}/{id}", api(lambda r, d: svc.decide_proposal(T(r), r.path_params["profile"], r.path_params["id"], str(d.get("decision") or ""), by=A(r),
                                                                                     accept_changes=bool(d.get("accept_changes"))), body=True), methods=["POST"]),
@@ -283,10 +318,18 @@ def create_app(service: Service | None = None, *, tenant_of: Callable[[Request],
         Route("/api/v1/knowledge/export", api(k_export)),
         Route("/api/v1/cases", api(v1_submit, body=True), methods=["POST"]),
         Route("/api/v1/cases/{ref}", api(lambda r: result(svc.case(T(r), ref(r))))),
+        Route("/api/v1/cases/{ref}/record", api(record)),
+        Route("/api/v1/insights", api(lambda r: svc.insights(T(r)))),
         Route("/api/v1/cases/{ref}/ask", api(lambda r, d: svc.ask(T(r), ref(r), str(d.get("question") or "")), body=True), methods=["POST"]),
         Route("/api/v1/health", api(lambda r: {"product": PRODUCT, "version": __version__, "model": svc.config()["model"], "repository": svc.repository.status()})),
     ]
-    app = Starlette(routes=routes)
+    async def plainly(request: Request, exc: Exception) -> Response:   # an address or a method this API does not have: said as the rest of the API says things
+        code = getattr(exc, "status_code", 500)
+        if request.url.path.startswith("/api/") or request.url.path == "/api":
+            return JSONResponse({"detail": {404: "there is nothing at this address", 405: f"this address does not take {request.method}"}.get(code, str(getattr(exc, "detail", "")) or "the request was refused")}, status_code=code)
+        return Response(str(getattr(exc, "detail", "")) or "not found", status_code=code, media_type="text/plain")
+
+    app = Starlette(routes=routes, exception_handlers={HTTPException: plainly})
     app.state.service = svc
     return app
 

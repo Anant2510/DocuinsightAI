@@ -7,6 +7,12 @@ and line each came from, and link the same company or reference number across th
 model's opinion, check that nothing is missing, that the dates and amounts hold and that the documents agree. A person
 gets one of three recommendations, and every reason opens the line it rests on.
 
+Every case is also checked three ways that do not depend on the use case: **integrity** (does each document hold
+together on its own: its sums, its dates, the check digits of its account numbers, the same file twice, bank details
+that changed since last time), **screening** (is any party, vessel or port on a watchlist) and **privacy** (what
+personal data the package carries, masked in whatever leaves the system). It then lands in a **work queue** with a
+priority and a due date, and leaves as a **decision record** that can be printed.
+
 It names no customer and no industry. A use case is one configuration file (`src/docuinsights/profiles/*.yaml`): the
 kinds of document, the evidence it asks for, its rules. Five ship, each with invented sample cases:
 
@@ -49,12 +55,16 @@ python -m docuinsights serve --port 8090
 ```
 
 Open the workbench and pick a use case on the home page: **Try it** on a sample runs it end to end. The top of the page
-has five screens: Home, Cases, Knowledge (everything known, explored as in KB Forge: four levels, industry, domain,
-solution, customer), Agents (their contracts) and How it is governed (contracts, memory, provenance, throttling as they stand).
-Inside a case: summary, documents, evidence, consistency, rules, the graph, provenance, the what-if simulator, the
-decision, and **Agent orchestration**: one board that shows the boss agent's plan, each agent run under its contract,
-and what every step took from the knowledge graph and the shared memory. It follows a running assessment and plays a
-finished one back.
+has six screens: Home, Cases (the work queue: priority, queue, due date, who has it), Insights (how many cases go
+straight through, how many need a person and why, how long a decision takes; counted from the case files), Knowledge
+(everything known, explored as in KB Forge: four levels, industry, domain, solution, customer), Agents (their
+contracts) and How it is governed (contracts, memory, provenance, throttling, watchlists as they stand).
+Inside a case: summary, documents, evidence, consistency, **screening, integrity and privacy**, rules, the graph,
+provenance, the what-if simulator, the decision with its printable record, and **Agent orchestration**: one board
+that shows the boss agent's plan, each agent run under its contract, and what every step took from the knowledge
+graph and the shared memory. It follows a running assessment and plays a finished one back.
+
+Documents can be PDF, Word, Excel, an email with its attachments, a web page, text, CSV or a scan.
 
 ## The knowledge base and KB Forge
 
@@ -100,6 +110,12 @@ the API answers 127.0.0.1 only.
 
 Behind a reverse proxy under a prefix: `./start.sh --root-path /docuinsights` and forward `/docuinsights/` to the port.
 
+**Watchlists.** Out of the box screening runs against an invented demonstration list, and says so. Name your own
+lists in `DOCUINSIGHTS_WATCHLISTS` (JSON or CSV files, or folders of them) and the invented one is no longer used.
+
+**Telling another system.** Set `DOCUINSIGHTS_WEBHOOK_URL` and a small signed message is sent when a case is assessed
+or decided (`DOCUINSIGHTS_WEBHOOK_SECRET` signs it). Personal data in it is masked.
+
 ## On a server
 
 [DEPLOY.md](DEPLOY.md) puts it on a Windows server as a service behind the machine's web server, reached from
@@ -110,7 +126,9 @@ running installation up to date.
 ## Use it from another system
 
 `POST /api/v1/cases` with `{reference, profile, fields, documents: [{name, category, content_base64}], wait: true}`
-returns the assessment as JSON. `DOCUINSIGHTS_REPOSITORY=omnidocs` files assessed cases to NewgenONE OmniDocs.
+returns the assessment as JSON: outcome, reasons, findings, triage, watchlist matches, personal data by kind.
+`GET /api/v1/cases/{reference}/record` is the decision record (`?mask=1` masks personal data), `GET /api/v1/insights`
+the workspace's numbers, `GET /api/export/cases.csv` the work queue. `DOCUINSIGHTS_REPOSITORY=omnidocs` files assessed cases to NewgenONE OmniDocs.
 Both, and what has not been verified against a live system, are described in [DOCUINSIGHTS.md](DOCUINSIGHTS.md).
 
 ## Tests
@@ -120,8 +138,14 @@ pip install -e ".[dev,server,pdf]"
 python -m pytest
 ```
 
+`tests/test_docuinsights_engine.py` proves the engine on the bundled cases. `tests/test_docuinsights_scenarios.py`
+puts it through what an installation meets in practice (documents missing, blank, corrupt, filed twice or mislabelled;
+other countries' number and date formats; other alphabets; hostile text; many cases at once; an API called wrongly)
+and checks the same invariants after each. [DOCUINSIGHTS.md](DOCUINSIGHTS.md) lists the scenarios and what is not
+covered.
+
 ## One package, two homes
 
 `src/docuinsights` is the same package the CX Nova Agent Orchestration Layer carries as its DocuInsights agent pack.
 This folder is written by the layer repository's `scripts/export_docuinsights.py`. Change the accelerator in one of
-the two and carry `src/docuinsights` (and `tests/test_docuinsights_engine.py`) across, so the copies do not drift.
+the two and carry `src/docuinsights` (and the two `tests/test_docuinsights_*.py` files) across, so the copies do not drift.

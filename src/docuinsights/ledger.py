@@ -47,10 +47,35 @@ class Ledger:
                     out.append({"n": len(out) + 1, "corrupt": True, "hash": ""})
         return out
 
+    def _last(self) -> dict[str, Any] | None:
+        """The last entry, read from the end of the file (a ledger of a hundred thousand entries is not read whole to add one)."""
+        try:
+            size = self.path.stat().st_size
+        except OSError:
+            return None
+        if not size:
+            return None
+        with self.path.open("rb") as fh:
+            step = 8192
+            while True:
+                fh.seek(max(0, size - step))
+                tail = fh.read().rstrip(b"\n")
+                if b"\n" in tail or step >= size:
+                    break
+                step *= 4
+        try:
+            last = json.loads(tail.split(b"\n")[-1].decode("utf-8"))
+            return last if isinstance(last, dict) and isinstance(last.get("n"), int) and last.get("hash") else None
+        except (ValueError, UnicodeDecodeError):
+            return None
+
     def append(self, kind: str, actor: str, summary: str, *, case: str = "", data: dict[str, Any] | None = None) -> dict[str, Any]:
         with self._lock:
-            lines = self._lines()
-            entry = {"n": len(lines) + 1, "at": now(), "kind": kind, "actor": actor, "case": case, "summary": summary[:300], "data": data or {}, "prev": lines[-1]["hash"] if lines else GENESIS}
+            last = self._last()
+            if last is None:   # an empty ledger, or a last line that cannot be read: count the lines, so the entry lands where verify() expects it
+                lines = self._lines()
+                last = {"n": len(lines), "hash": lines[-1]["hash"] if lines else GENESIS}
+            entry = {"n": last["n"] + 1, "at": now(), "kind": kind, "actor": actor, "case": case, "summary": summary[:300], "data": data or {}, "prev": last["hash"] or GENESIS}
             entry["hash"] = _seal(entry)
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self.path.open("a", encoding="utf-8") as fh:

@@ -13,7 +13,7 @@
 #   limits     a run longer than timeout_s is reported; retries apply to a failed run
 #   on_failure stop (the assessment stops), degrade (carry on without this agent's contribution, and say so) or
 #              escalate (carry on, and send the case to a person)
-version: "1.0"
+version: "1.1"
 contracts:
   - id: orchestrator
     purpose: Runs the agents in order, holds the human checkpoints, and writes what the case taught the workspace.
@@ -173,6 +173,66 @@ contracts:
     memory: {read: [run, case, workspace], write: [run]}
     limits: {timeout_s: 60, retries: 0}
     on_failure: stop
+
+  - id: privacy
+    purpose: "Finds the personal data in the package (by document and by kind) so that it can be masked in whatever leaves the system."
+    needs: [documents_are_read]
+    promises:
+      - {check: personal_data_is_reported, text: "What personal data the package holds is reported, by document and by kind."}
+      - {check: personal_values_are_masked, text: A personal value is never repeated in the clear in a finding.}
+      - {check: findings_show_their_reasoning, text: Every finding says how it was reached.}
+    never: ["send a document to a model", "copy a personal value into a finding unmasked", "alter or redact a stored document"]
+    writes: [privacy, findings]
+    reads: [documents]
+    grounding: [PolicyRule, Provision, BestPractice, Term, Standard, Regulation]
+    model: {use: none}
+    memory: {read: [run, case], write: [run]}
+    limits: {timeout_s: 60, retries: 0}
+    on_failure: escalate
+
+  - id: screening
+    purpose: "Compares every party, and any vessel or place the use case names, with the watchlists, and leaves each possible match to a person."
+    needs: [entities_are_resolved]
+    promises:
+      - {check: every_party_is_screened, text: Every party the use case asks to be screened was screened.}
+      - {check: matches_wait_for_a_person, text: "A possible match always waits for a person: the system never clears one."}
+      - {check: findings_show_their_reasoning, text: Every finding says how it was reached.}
+    never: ["clear a possible match", "use a model", "report a screening that did not happen as clear"]
+    writes: [screening, findings]
+    reads: [entities, documents]
+    grounding: [PolicyRule, Provision, BestPractice, Term, Standard, Regulation]
+    model: {use: none}
+    memory: {read: [run, case], write: [run]}
+    limits: {timeout_s: 60, retries: 0}
+    on_failure: escalate
+
+  - id: integrity
+    purpose: "Checks that each document holds together on its own: its sums, its dates, the check digits of its identifiers, the same file twice, and details that changed since the workspace last saw the party."
+    needs: [facts_are_extracted, entities_are_resolved]
+    promises:
+      - {check: declared_checks_are_answered, text: Every calculation the use case declares gets a finding.}
+      - {check: findings_show_their_reasoning, text: Every finding says how it was reached.}
+    never: ["use a model", "call a document forged: it reports what does not hold and a person concludes", "accept a changed detail on the document's own word"]
+    writes: [findings, graph]
+    reads: [documents, entities, graph]
+    grounding: [PolicyRule, Provision, BestPractice, Term, Standard, Regulation]
+    model: {use: none}
+    memory: {read: [run, case, workspace], write: [run]}
+    limits: {timeout_s: 60, retries: 0}
+    on_failure: escalate
+
+  - id: triage
+    purpose: "Says how urgent the case is, which queue should pick it up and when it is due, each with its reasons."
+    needs: [recommendation_exists]
+    promises:
+      - {check: triage_is_complete, text: "The case gets a priority, a queue and a due date, each with its reasons."}
+    never: ["change a finding or the recommendation", "use a model", "assign the case to a named person"]
+    writes: [triage]
+    reads: [findings, recommendation]
+    model: {use: none}
+    memory: {read: [run, case], write: [run]}
+    limits: {timeout_s: 30, retries: 0}
+    on_failure: degrade
 
   - id: counterfactual
     purpose: "Changes one fact on a copy of the case, reruns the checks that depend on it, and reports what moved."

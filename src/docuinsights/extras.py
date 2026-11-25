@@ -81,7 +81,8 @@ def counterfactual(case: dict[str, Any], profile: Profile, tools: P.Tools, chang
     twin["history"], twin["events"] = [], []
     described = apply_change(twin, profile, change, case)
     # the copy is assessed with the same memory and the same limits as the case, and leaves no trace: no ledger line, nothing learned
-    quiet = P.Tools(model=tools.model, read_bytes=tools.read_bytes, overlay=tools.overlay, fetch=tools.fetch, sidecar=tools.sidecar, episodes=tools.episodes, limiter=tools.limiter)
+    quiet = P.Tools(model=tools.model, read_bytes=tools.read_bytes, overlay=tools.overlay, fetch=tools.fetch, sidecar=tools.sidecar, episodes=tools.episodes, limiter=tools.limiter,
+                    today=tools.today, watchlists=tools.watchlists)
     after = P.assess(twin, profile, quiet, trigger="counterfactual", by="counterfactual agent")
     b = {f["id"]: f for f in before["findings"]}
     a = {f["id"]: f for f in after["findings"]}

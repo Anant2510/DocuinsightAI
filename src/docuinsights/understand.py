@@ -77,6 +77,12 @@ def classify(case: dict[str, Any], profile: Profile, model: Any, overlay: dict[s
         d["classification"] = cls
         if d.get("review", {}).get("classification_version") != d["current"]:
             d.pop("effective_type", None)   # a new version is classified afresh; an earlier correction does not carry over silently
+    for d in docs:   # an email that carried a document is not a second one of that kind, however its covering words read
+        carried = {doc_type(x) for x in docs if x.get("attached_to") == d["id"]} - {None}
+        cls = d.get("classification") or {}
+        if carried and cls.get("type") in carried and not d.get("effective_type"):
+            cls.update(type=None, confidence=0.0, method="none", agrees=False,
+                       rationale=f"the message that carried a {profile.type_name(next(iter(carried & {cls['type']}))).lower()}: the attachment is the document, the message is not a second one")
     rows = [{"doc": d["id"], "name": d["name"], "original": d.get("category") or "", "type": (d.get("classification") or {}).get("type"),
              "effective": doc_type(d), "confidence": (d.get("classification") or {}).get("confidence"), "agrees": (d.get("classification") or {}).get("agrees")} for d in docs]
     mismatches = [r for r in rows if not r["agrees"]]
@@ -115,7 +121,7 @@ def extract_by_labels(pages: list[str], fields: list[dict[str, Any]]) -> dict[st
 
 def _field(value: Any, spec: dict[str, Any], confidence: float, method: str, anchor: dict[str, Any] | None, verified: bool) -> dict[str, Any]:
     ftype = spec.get("type", "text")
-    norm = V.normalise(value, ftype)
+    norm = V.normalise(value, ftype, spec.get("order") or "day_first")
     return {"value": str(value), "norm": norm, "type": ftype, "confidence": round(confidence if norm is not None else 0.0, 2), "method": method,
             "anchor": anchor, "verified": bool(verified and norm is not None)}
 

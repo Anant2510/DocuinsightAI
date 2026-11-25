@@ -36,6 +36,7 @@ document_types:
       - {id: supplier, name: Supplier, type: party, labels: [Supplier], required: true}
       - {id: description, name: Goods ordered, type: text, labels: [Goods Ordered]}
       - {id: quantity, name: Quantity ordered, type: number, labels: [Quantity Ordered], required: true}
+      - {id: unit_price, name: Unit price, type: money, labels: [Unit Price]}
       - {id: order_total, name: Order total, type: money, labels: [Order Total], required: true}
   - id: supplier_invoice
     name: Supplier invoice
@@ -49,7 +50,9 @@ document_types:
       - {id: po_reference, name: PO reference, type: ref, labels: [PO Reference]}
       - {id: description, name: Goods supplied, type: text, labels: [Goods Supplied]}
       - {id: quantity, name: Quantity invoiced, type: number, labels: [Quantity Invoiced]}
+      - {id: unit_price, name: Unit price, type: money, labels: [Unit Price]}
       - {id: invoice_total, name: Invoice total, type: money, labels: [Invoice Total], required: true}
+      - {id: bank_account, name: Bank account to pay, type: ref, labels: [Bank Account (IBAN), IBAN]}
   - id: goods_received_note
     name: Goods received note
     group: receipt
@@ -92,6 +95,7 @@ entities:
     Purchase order: [purchase_order.po_number, supplier_invoice.po_reference, goods_received_note.po_reference, delivery_note.po_reference]
     Invoice: [supplier_invoice.invoice_number]
     Receipt: [goods_received_note.grn_number, delivery_note.delivery_number]
+    Bank account: [supplier_invoice.bank_account]
 
 # What the workspace's memory is asked to watch for: an invoice number another case already quotes goes to a person.
 memory:
@@ -144,6 +148,27 @@ consistency:
   - {id: goods, family: goods, title: The goods invoiced are the goods ordered, kind: text, severity: medium,
      fields: [purchase_order.description, supplier_invoice.description, goods_received_note.description]}
 
+# What the integrity agent is told about this use case. Each line is a deterministic check; none is a model's opinion.
+integrity:
+  sums:
+    - {id: order_arithmetic, title: The order's quantity and unit price give its total, kind: product, parts: [purchase_order.quantity, purchase_order.unit_price], equals: purchase_order.order_total}
+    - {id: invoice_arithmetic, title: The invoice's quantity and unit price give its total, kind: product, parts: [supplier_invoice.quantity, supplier_invoice.unit_price], equals: supplier_invoice.invoice_total}
+  identifiers:
+    - {id: bank_account_check, title: The bank account number passes its check digits, field: supplier_invoice.bank_account, check: iban}
+  issued: [purchase_order.order_date, supplier_invoice.invoice_date, goods_received_note.received_date, delivery_note.delivery_date]
+  stable:
+    - {id: bank_details, title: The supplier is paid into the account it used before, role: Supplier, reference: Bank account,
+       advice: "Confirm the change with the supplier on a telephone number you already hold, before any payment."}
+
+# Every party is screened against the watchlists (the default). The service target is ILLUSTRATIVE.
+service:
+  target_days: 5
+  clock: working
+  starts: case.received_date
+  value: supplier_invoice.invoice_total
+  high_value: 25000
+  note: Illustrative. Five working days from receipt of the invoice; an invoice of 25,000 or more is high value.
+
 outcomes:
   proceed: {label: Ready to pay, description: "The order, the invoice and the receipt agree, and the invoice has not been seen before."}
   request_evidence: {label: Request missing document, description: "The order, the invoice or the proof of receipt is missing."}
@@ -193,6 +218,15 @@ samples:
       - {file: purchase_order_b.pdf, category: purchase_order}
       - {file: invoice_over.pdf, category: supplier_invoice}
       - {file: goods_received_note_short.pdf, category: goods_received_note}
+  - id: payment_change
+    title: New bank details and a total that does not add up
+    story: "The invoice is within tolerance of its order, so the three-way match passes. But its quantity and unit price do not give its total, and it asks to be paid into an account this supplier has not used before (load 'Clean three-way match' first to see that)."
+    path: supplier_invoice
+    case: {reference: AP-2026-004702, received_date: "2026-11-19"}
+    documents:
+      - {file: purchase_order_c.pdf, category: purchase_order}
+      - {file: invoice_new_account.pdf, category: supplier_invoice}
+      - {file: goods_received_note_c.pdf, category: goods_received_note}
   - id: duplicate
     title: "The same invoice, submitted again"
     story: "Load 'Clean three-way match' first. This case presents the same invoice under a new reference: the documents agree with each other, and the workspace's memory recognises the invoice."

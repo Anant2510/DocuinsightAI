@@ -7,12 +7,18 @@ from __future__ import annotations
 
 import base64
 import copy
+import functools
+import hashlib
+import hmac
+import json
 import os
 import threading
+import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from . import contracts as C, extras, harness as H, kb as KB, model as M, ontology as O, pipeline as P, reader, repository as Repo, throttle as T
+from . import assurance, contracts as C, extras, harness as H, kb as KB, model as M, net, ontology as O, pipeline as P, reader, reports, repository as Repo, throttle as T
 from .ledger import Ledger, digest
 from .memory import SCOPES, Episodes
 from .casefile import current, doc_type, event, live_docs, new_case, now
@@ -21,6 +27,17 @@ from .store import CaseStore, safe
 
 HERE = Path(__file__).resolve().parent
 DECISIONS = ("approve", "request_evidence", "escalate", "reject")
+STALE_AFTER_S = 900.0   # an assessment whose case file has not moved for this long, with no thread behind it, was interrupted
+BUSY_WAIT_S = 30.0      # how long a change to a case waits for another change to the same case to finish
+
+
+def _held(fn: Any) -> Any:
+    """A method that changes one case: it holds that case while it runs, so two changes never overwrite each other."""
+    @functools.wraps(fn)
+    def inner(self: Any, tenant: str, reference: str, *args: Any, **kwargs: Any) -> Any:
+        with self._hold(tenant, safe(str(reference or ""), "case reference")):
+            return fn(self, tenant, reference, *args, **kwargs)
+    return inner
 
 
 class ServiceError(ValueError):
@@ -50,6 +67,24 @@ class Service:
         self.max_assessments = max(1, int(T._env("DOCUINSIGHTS_MAX_ASSESSMENTS", 2)))
         self._slots = threading.BoundedSemaphore(self.max_assessments)
         self._kb: dict[str, KB.KnowledgeBase] = {}
+        self._case_locks: dict[tuple[str, str], threading.RLock] = {}
+        self._guard = threading.Lock()
+
+    @contextmanager
+    def _hold(self, tenant: str, reference: str, wait: float | None = None) -> Any:
+        """One change to a case at a time. Everything that changes a case reads it, changes it and writes it back: two of those at once
+        would lose one of the changes (an assignment made while the assessment runs, say). A change that cannot start in time says so."""
+        with self._guard:
+            lock = self._case_locks.setdefault((tenant, reference), threading.RLock())
+        if not lock.acquire(timeout=BUSY_WAIT_S if wait is None else wait):
+            raise ServiceError(f"case '{reference}' is being changed by something else (an assessment, most likely). Try again when it has finished.", 409)
+        try:
+            yield
+        finally:
+            lock.release()
+            if not self.store.exists(tenant, reference):   # nothing was created under this name: no lock is kept for it
+                with self._guard:
+                    self._case_locks.pop((tenant, reference), None)
 
     # ------------------------------------------------------------------ describing the installation
     def config(self) -> dict[str, Any]:
@@ -59,7 +94,11 @@ class Service:
         return {"profiles": [p.summary() for p in load_profiles().values()], "model": model,
                 "repository": self.repository.status(), "stages": P.STAGES,
                 "agents": [{**a, "contract": C.plain(C.get(a["id"]))} for a in P.AGENTS],
-                "reference_live": os.environ.get("DOCUINSIGHTS_REFERENCE_LIVE") == "1" or self.fetch is not None}
+                "reference_live": os.environ.get("DOCUINSIGHTS_REFERENCE_LIVE") == "1" or self.fetch is not None,
+                "accepts": sorted(reader.MIME), "max_file_mb": reader.MAX_BYTES // (1024 * 1024),
+                "watchlists": [{k: w[k] for k in ("id", "name", "version", "published", "demonstration", "source")} | {"entries": len(w["entries"])} for w in assurance.watchlists()],
+                "watchlist_problems": assurance.watchlist_problems(),
+                "webhook": bool(os.environ.get("DOCUINSIGHTS_WEBHOOK_URL"))}
 
     def _model(self, tenant: str, model: Any = None) -> Any:
         return model if model is not None else (self.model_of(tenant) if self.model_of else self.model)
@@ -100,6 +139,43 @@ class Service:
             event(case, "knowledge.failed", f"The workspace's knowledge could not be updated ({type(exc).__name__}: {str(exc)[:160]})", by="orchestrator")
             return None
 
+    def notify(self, tenant: str, case: dict[str, Any], what: str) -> dict[str, Any] | None:
+        """Tell another system that a case was assessed or decided (DOCUINSIGHTS_WEBHOOK_URL): one small JSON message with the personal data
+        in it masked, signed when DOCUINSIGHTS_WEBHOOK_SECRET is set. It is sent in the background; a failure never touches the case and is
+        written to the ledger. Returns the message (None when no address is set)."""
+        url = os.environ.get("DOCUINSIGHTS_WEBHOOK_URL") or ""
+        if not url.lower().startswith(("https://", "http://")):
+            return None
+        try:
+            profile = get_profile(case["profile"])
+            names = assurance.personal_names(case, profile)
+        except Exception:
+            names = []
+        a = case.get("assessment") or {}
+        rec = a.get("recommendation") or {}
+        t = a.get("triage") or {}
+        body = {"event": what, "at": now(), "reference": case["reference"], "use_case": case["profile"], "status": case.get("status"), "assessment": a.get("id"),
+                "outcome": rec.get("outcome"), "label": rec.get("label"), "reasons": [assurance.mask(r, names) for r in (rec.get("reasons") or [])[:10]],
+                "requests": [assurance.mask(r, names) for r in (rec.get("requests") or [])[:10]],
+                "triage": {k: t.get(k) for k in ("priority", "queue", "queue_name", "due")} if t else None,
+                "decision": {k: (case.get("decision") or {}).get(k) for k in ("decision", "by", "at", "override")} if case.get("decision") else None}
+        raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        headers = {"content-type": "application/json", "user-agent": "DocuInsights", "x-docuinsights-event": what}
+        secret = os.environ.get("DOCUINSIGHTS_WEBHOOK_SECRET") or ""
+        if secret:
+            headers["x-docuinsights-signature"] = "sha256=" + hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+        ledger, ref = self.ledger(tenant), case["reference"]
+
+        def send() -> None:
+            try:
+                with net.urlopen(urllib.request.Request(url, data=raw, headers=headers, method="POST"), timeout=10) as resp:
+                    ledger.append("notification", "orchestrator", f"{what} sent for {ref} (HTTP {getattr(resp, 'status', 200)})", case=ref, data={"event": what, "body": digest(body)})
+            except Exception as exc:
+                ledger.append("notification", "orchestrator", f"{what} could not be sent for {ref} ({type(exc).__name__}: {str(exc)[:120]})", case=ref, data={"event": what, "failed": True})
+
+        threading.Thread(target=send, name=f"docuinsights-notify-{ref}", daemon=True).start()
+        return body
+
     def tools(self, tenant: str, case: dict[str, Any], profile: Profile, model: Any = None, *, progress: bool = True, record: bool = True) -> P.Tools:
         overlay = copy.deepcopy(self.store.feedback(tenant, profile.id)["overlay"])
         if case.get("aliases"):   # a reviewer's own decision on this case applies here at once; the shared vocabulary changes only by approval
@@ -118,7 +194,7 @@ class Service:
                        sidecar=lambda d, v: v.get("sidecar"),
                        progress=(lambda c: self.store.save(tenant, c)) if progress else None,
                        limiter=self.limiter, episodes=self.episodes(tenant), ledger=self.ledger(tenant) if record else None,
-                       on_finish=(lambda c: self.learn(tenant, c)) if record else None,
+                       on_finish=(lambda c: (self.learn(tenant, c), self.notify(tenant, c, "case.assessed"))) if record else None,
                        ground=(lambda agent, c, prof, classes: kb.grounding(prof.name, classes)) if kb.built() else None)
 
     def _agent(self, tenant: str, case: dict[str, Any], agent_id: str, fn: Any, *, model: Any = None, extra: Any = None, summary: Any = None) -> Any:
@@ -136,25 +212,38 @@ class Service:
 
     # ------------------------------------------------------------------ cases and documents
     def cases(self, tenant: str) -> list[dict[str, Any]]:
-        return self.store.list(tenant)
+        return self.queue(tenant)
 
     def case(self, tenant: str, reference: str) -> dict[str, Any]:
         try:
-            return self.store.load(tenant, safe(reference, "case reference"))
+            case = self.store.load(tenant, safe(reference, "case reference"))
         except KeyError as exc:
             raise ServiceError(str(exc.args[0]), 404) from exc
+        pr = case.get("progress") or {}
+        if pr.get("state") == "running":   # still running, or left that way by a service that stopped mid-assessment?
+            t = self._running.get((tenant, reference))
+            if not (t and t.is_alive()) and self.store.age(tenant, reference) > STALE_AFTER_S:
+                case["progress"] = {"state": "failed", "stage": pr.get("stage", ""), "done": pr.get("done", []),
+                                    "error": "The assessment was interrupted: the service stopped while it ran. Assess the case again."}
+                case.pop("working", None)
+                event(case, "assessment.interrupted", "An assessment was left unfinished when the service stopped. Nothing of it was kept.", by="orchestrator")
+                self.store.save(tenant, case)
+        return case
 
     def create_case(self, tenant: str, reference: str, profile_id: str | None, fields: dict[str, Any] | None = None, *, by: str = "caseworker") -> dict[str, Any]:
         profile = get_profile(profile_id)
         reference = safe((reference or "").strip(), "case reference")
-        if self.store.exists(tenant, reference):
-            raise ServiceError(f"case '{reference}' already exists", 409)
-        case = new_case(reference, profile, fields, by=by)
-        self.store.save(tenant, case)
+        fields = fields if isinstance(fields, dict) else {}
+        with self._hold(tenant, reference):
+            if self.store.exists(tenant, reference):
+                raise ServiceError(f"case '{reference}' already exists", 409)
+            case = new_case(reference, profile, fields, by=by)
+            self.store.save(tenant, case)
         return case
 
+    @_held
     def add_document(self, tenant: str, reference: str, name: str, data: bytes, *, category: str = "", by: str = "caseworker", replaces: str | None = None,
-                     sidecar: str | None = None, note: str = "") -> dict[str, Any]:
+                     sidecar: str | None = None, note: str = "", attached_to: str | None = None) -> dict[str, Any]:
         """A new document, or a new version of one (same file name, or `replaces` naming the document it amends)."""
         case = self.case(tenant, reference)
         failed = [c for c in reader.check_file(name, data) if c["status"] == "fail"]
@@ -165,7 +254,7 @@ class Service:
         if doc is not None and current(doc).get("sha256") == digest:
             return case   # the same bytes again: nothing new to record
         if doc is None:
-            doc = {"id": f"D{len(case['documents']) + 1}", "name": name, "category": category, "current": 0, "versions": []}
+            doc = {"id": f"D{len(case['documents']) + 1}", "name": name, "category": category, "current": 0, "versions": [], **({"attached_to": attached_to} if attached_to else {})}
             case["documents"].append(doc)
         v = len(doc["versions"]) + 1
         rel = self.store.write_file(tenant, reference, doc["id"], v, name, data)
@@ -178,6 +267,16 @@ class Service:
               f"{name} " + ("added" if v == 1 else f"replaces {doc['name']} as version {v}") + f" (sha256 {digest[:12]})" + (f": {note}" if note else ""), by=by,
               data={"doc": doc["id"], "version": v, "sha256": digest})
         self.store.save(tenant, case)
+        left_out = []
+        for att_name, att in reader.attachments(name, data):   # what an email carries becomes documents of their own, each checked like any other file
+            if any(c["status"] == "fail" for c in reader.check_file(att_name, att)) or att_name.lower().endswith(".eml"):
+                left_out.append(att_name)
+                continue
+            case = self.add_document(tenant, reference, att_name, att, by=by, note=f"attached to {name}", attached_to=doc["id"])
+        if left_out:
+            case = self.case(tenant, reference)
+            event(case, "document.skipped", f"{len(left_out)} attachment(s) of {name} were not taken in (a kind of file that is not read, or too large): {', '.join(left_out[:8])}", by=by)
+            self.store.save(tenant, case)
         return case
 
     def load_sample(self, tenant: str, profile_id: str, sample_id: str, *, reference: str | None = None, by: str = "caseworker") -> dict[str, Any]:
@@ -202,6 +301,7 @@ class Service:
         side = base / (file + ".ocr.txt")
         self.add_document(tenant, ref, file, (base / file).read_bytes(), category=category, by=by, sidecar=side.read_text(encoding="utf-8") if side.exists() else None, **kw)
 
+    @_held
     def next_amendment(self, tenant: str, reference: str, *, by: str = "caseworker") -> dict[str, Any]:
         """The temporal sample: the amended document arrives after the first assessment."""
         case = self.case(tenant, reference)
@@ -221,10 +321,13 @@ class Service:
         doc = next((d for d in case["documents"] if d["id"] == doc_id), None)
         if doc is None or doc.get("assumed"):
             raise ServiceError("no such document", 404)
+        if version is not None and not 1 <= version <= len(doc["versions"]):
+            raise ServiceError(f"{doc['name']} has no version {version}", 404)
         ver = doc["versions"][(version or doc["current"]) - 1]
         return self.store.read_file(tenant, reference, ver["file"]), ver.get("name") or doc["name"]
 
     # ------------------------------------------------------------------ assessment
+    @_held
     def assess(self, tenant: str, reference: str, *, by: str = "caseworker", trigger: str = "assessment", model: Any = None) -> dict[str, Any]:
         case = self.case(tenant, reference)
         if not live_docs(case):
@@ -241,8 +344,10 @@ class Service:
         key = (tenant, reference)
         if key in self._running and self._running[key].is_alive():
             return case
-        case["progress"] = {"state": "running", "stage": "queued", "done": []}
-        self.store.save(tenant, case)
+        with self._hold(tenant, reference):
+            case = self.case(tenant, reference)
+            case["progress"] = {"state": "running", "stage": "queued", "done": []}
+            self.store.save(tenant, case)
 
         def work() -> None:
             self._slots.acquire()   # at most DOCUINSIGHTS_MAX_ASSESSMENTS at a time; the rest wait their turn, shown as queued
@@ -252,11 +357,15 @@ class Service:
                 else:
                     self.assess(tenant, reference, by=by, trigger=trigger)
             except Exception as exc:
-                c = self.case(tenant, reference)
-                c["progress"] = {"state": "failed", "stage": (c.get("progress") or {}).get("stage", ""), "done": (c.get("progress") or {}).get("done", []),
-                                 "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
-                c.pop("working", None)
-                self.store.save(tenant, c)
+                try:
+                    with self._hold(tenant, reference):
+                        c = self.case(tenant, reference)
+                        c["progress"] = {"state": "failed", "stage": (c.get("progress") or {}).get("stage", ""), "done": (c.get("progress") or {}).get("done", []),
+                                         "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+                        c.pop("working", None)
+                        self.store.save(tenant, c)
+                except Exception:   # the case itself is gone or cannot be written: there is nowhere left to say so
+                    pass
             finally:
                 self._slots.release()
 
@@ -266,6 +375,7 @@ class Service:
         return case
 
     # ------------------------------------------------------------------ the caseworker
+    @_held
     def review(self, tenant: str, reference: str, payload: dict[str, Any], *, by: str = "caseworker") -> dict[str, Any]:
         """A human checkpoint: approve or correct a classification, correct a field, settle a possible entity match, or note a finding."""
         case = self.case(tenant, reference)
@@ -327,8 +437,19 @@ class Service:
             f["human"] = {"decision": decision, "by": by, "at": review["at"], "note": review["reason"]}
             review.update(finding=f["id"], value=decision)
             detail = f"Finding {f['id']} ({f['title']}) " + ("accepted" if decision == "accept" else "flagged") + (f": {review['reason']}" if review["reason"] else "")
+        elif target == "screening":
+            f = next((x for x in (case.get("assessment") or {}).get("findings") or [] if x["id"] == payload.get("id") and (x.get("data") or {}).get("screening", {}).get("key")), None)
+            if f is None or decision not in ("clear", "confirm"):
+                raise ServiceError("name a watchlist match and decide clear or confirm")
+            if decision == "clear" and len(review["reason"].strip()) < 5:
+                raise ServiceError("say why this is not the listed party: the reason is part of the audit trail")
+            hit = f["data"]["screening"]
+            case.setdefault("screening_decisions", {})[hit["key"]] = {"decision": decision, "by": by, "at": review["at"], "reason": review["reason"], "subject": hit.get("subject"), "entry": hit.get("entry")}
+            review.update(finding=f["id"], value=decision, data={"subject": hit.get("subject"), "entry": hit.get("entry"), "list": hit.get("list"), "score": hit.get("score")})
+            detail = f"Watchlist match of '{hit.get('subject')}' with '{hit.get('entry')}' " + ("cleared" if decision == "clear" else "confirmed") + (f": {review['reason']}" if review["reason"] else "")
+            reassess = True
         else:
-            raise ServiceError("target is classification, field, entity_match or finding")
+            raise ServiceError("target is classification, field, entity_match, finding or screening")
         case["reviews"].append(review)
         event(case, f"review.{target}", detail, by=by, data={"review": review["id"]})
         fb = self.store.feedback(tenant, profile.id)
@@ -343,6 +464,7 @@ class Service:
             return self.assess(tenant, reference, by=by, trigger="correction")
         return case
 
+    @_held
     def decide(self, tenant: str, reference: str, decision: str, note: str = "", *, by: str = "caseworker") -> dict[str, Any]:
         case = self.case(tenant, reference)
         a = case.get("assessment")
@@ -362,8 +484,55 @@ class Service:
                                    data={"decision": decision, "recommendation": rec["outcome"], "override": override, "assessment": a["id"]})
         self.learn(tenant, case, why="decision")
         self.store.save(tenant, case)
+        self.notify(tenant, case, "case.decided")
         return case
 
+    @_held
+    def assign(self, tenant: str, reference: str, to: str, *, by: str = "caseworker") -> dict[str, Any]:
+        """Who is working the case. An empty name hands it back to its queue."""
+        case = self.case(tenant, reference)
+        to = " ".join(str(to or "").split())[:60]
+        before = (case.get("assigned") or {}).get("to") or ""
+        if to == before:
+            return case
+        case["assigned"] = {"to": to, "by": by, "at": now()} if to else None
+        detail = f"Assigned to {to}" + (f" (was {before})" if before else "") if to else f"Returned to the queue (was {before})"
+        event(case, "case.assigned", detail, by=by)
+        self.ledger(tenant).append("assignment", by, f"{reference}: {detail}", case=reference, data={"to": to, "from": before})
+        self.store.save(tenant, case)
+        return case
+
+    # ------------------------------------------------------------------ what leaves a case: the record, the queue, the numbers
+    def record(self, tenant: str, reference: str, *, masked: bool = False, by: str = "caseworker") -> str:
+        """The decision record of a case: one printable page. Reading it is itself written to the ledger."""
+        case = self.case(tenant, reference)
+        ledger = self.ledger(tenant)
+        ledger.append("record", by, f"Decision record of {reference} produced" + (" with personal data masked" if masked else ""), case=reference, data={"masked": masked})
+        return reports.decision_record(case, get_profile(case["profile"]), ledger=ledger.verify(), entries=ledger.entries(case=reference, limit=1000), masked=masked, by=by)
+
+    def queue(self, tenant: str) -> list[dict[str, Any]]:
+        """Every case as the work queue shows it: with where it stands against its due date today."""
+        rows = self.store.list(tenant)
+        for r in rows:
+            r.update(assurance.due_state({"due": r.get("due"), "clock": r.get("clock")}) if r.get("due") and not r.get("decision") else {})
+        return rows
+
+    def cases_csv(self, tenant: str) -> str:
+        names = {p.id: p.name for p in load_profiles().values()}
+        return reports.cases_csv([{**r, "use_case": names.get(r["profile"], r["profile"]), "recommendation": r.get("label")} for r in self.queue(tenant)])
+
+    def insights(self, tenant: str, *, limit: int = 500) -> dict[str, Any]:
+        """The workspace measured from its case files (the most recent `limit` cases)."""
+        rows = self.store.list(tenant)
+        cases = []
+        for r in rows[:limit]:
+            try:
+                cases.append(self.store.load(tenant, r["reference"]))
+            except (KeyError, OSError, ValueError):
+                continue
+        return reports.insights(cases, load_profiles(), total=len(rows))
+
+    @_held
     def counterfactual(self, tenant: str, reference: str, *, scenario: str | None = None, change: dict[str, Any] | None = None, value: Any = None,
                        model: Any = None) -> dict[str, Any]:
         case = self.case(tenant, reference)
@@ -399,6 +568,7 @@ class Service:
         except (ValueError, C.ContractBroken) as exc:
             raise ServiceError(str(exc)) from exc
 
+    @_held
     def ask(self, tenant: str, reference: str, question: str, model: Any = None) -> dict[str, Any]:
         case = self.case(tenant, reference)
         try:
@@ -410,6 +580,7 @@ class Service:
         self.store.save(tenant, case)
         return out
 
+    @_held
     def file_case(self, tenant: str, reference: str, *, by: str = "caseworker") -> dict[str, Any]:
         case = self.case(tenant, reference)
         if not case.get("assessment"):

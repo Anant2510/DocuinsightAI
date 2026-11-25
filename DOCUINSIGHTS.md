@@ -7,15 +7,18 @@ In four sentences:
 1. **Put the documents in.** A case is a handful of documents and a few facts about it.
 2. **Agents read and link them.** Each document is named, its facts are lifted with the page and line they came from,
    and the same company or reference number is joined across documents.
-3. **Rules check them.** Is anything missing, do the dates and amounts hold, do the documents agree? These checks are
-   code, never a model's opinion.
-4. **A person decides.** One of three recommendations with its reasons; every reason opens the line it rests on.
+3. **Rules check them.** Is anything missing, do the dates and amounts hold, do the documents agree, does each
+   document hold together on its own, is anyone on a watchlist? These checks are code, never a model's opinion.
+4. **A person decides.** One of three recommendations with its reasons; every reason opens the line it rests on. The
+   case arrives in a queue with a priority and a due date, and leaves as a decision record that can be printed.
 
 In full: DocuInsights classifies the documents, extracts facts with source anchors, resolves the parties, goods and
 references the documents share, writes a case knowledge graph, checks the evidence the use case requires, retrieves
 date-relevant reference content, runs deterministic rules, finds contradictions across documents, verifies that every
-finding is supported by a source, and hands a caseworker a traceable recommendation. The caseworker reviews, corrects
-and decides. Corrections become governed improvement proposals. A "what if" reruns the affected checks. What each case
+finding is supported by a source, and hands a caseworker a traceable recommendation. Four assurance agents run with
+them: privacy (what personal data the package holds), screening (parties against watchlists), integrity (sums, dates,
+check digits, the same file twice, bank details that changed) and triage (priority, queue, due date). The caseworker
+reviews, corrects and decides. Corrections become governed improvement proposals. A "what if" reruns the affected checks. What each case
 teaches is kept: the workspace remembers it and its knowledge graph grows.
 
 It is one engine with three ways in:
@@ -23,7 +26,7 @@ It is one engine with three ways in:
 | Way in | What it is | Where |
 | --- | --- | --- |
 | Standalone accelerator | The workbench and its API, on its own | `python -m docuinsights serve` |
-| CX Nova agent pack | Fifteen `di_*` agents and four flows on this layer; the workbench mounted at `/docuinsights` | `config/packs/docuinsights.yaml`, `src/caf/accelerators/docuinsights.py` |
+| CX Nova agent pack | Nineteen `di_*` agents and four flows on this layer; the workbench mounted at `/docuinsights` | `config/packs/docuinsights.yaml`, `src/caf/accelerators/docuinsights.py` |
 | Behind another system | A REST surface to submit a package and read the assessment, and a repository connector | `/api/v1/cases`, `src/docuinsights/repository.py` |
 
 The engine (`src/docuinsights`) imports nothing from this layer. The layer imports the engine.
@@ -66,30 +69,99 @@ uses the profile.
 
 ## The agents
 
-| Agent | Stage | Does | Model |
-| --- | --- | --- | --- |
-| Intake | 1 | registers the case, checks each file, keeps immutable versions with SHA-256, reads them into text | scans only |
-| Classification | 2 | names each document, with confidence, beside the uploader's category | yes, verified against the profile's signals |
-| Extraction | 2 | lifts declared fields with page, line and the line as printed; a value whose line cannot be found is marked unverified | yes, verified against the text |
-| Entity Resolution | 3 | links repeated parties, goods, references; near-matches go to a person | no |
-| Knowledge Graph | 4 | case, documents, versions, assertions, entities, provenance edges | no |
-| Evidence Completeness | 5 | mandatory, conditional, alternative evidence; shows how an absence was established | no |
-| Reference | 6 | retrieves reference content for a date with provenance; walks the hierarchy from stated characteristics | no |
-| Policy | 6 | executes the rules and shows each calculation, under a rule version | no |
-| Contradiction | 7 | compares the same fact across documents | no |
-| Verification | 8 | source coverage per finding, blocks unsupported conclusions, aggregates the recommendation | no |
-| Counterfactual | on demand | changes one fact on a copy, reruns, reports what moved | no |
-| Correspondence | on demand | drafts an evidence request or decision note; a model may polish, every item must survive | optional |
-| Feedback | on demand | turns corrections into proposals; approval runs a regression on the bundled samples | no |
-| Case Assistant | on demand | answers from the graph and the documents, cites sources, declines what they do not hold | yes, grounded |
-| Repository | on demand | files the case and its assessment metadata to the content repository | no |
+Fourteen run on every assessment, in this order. Six more run when they are asked.
+
+| Agent | Does | Model |
+| --- | --- | --- |
+| Intake | registers the case, checks each file, keeps immutable versions with SHA-256, reads them into text (PDF, Word, Excel, email with its attachments, web page, text, CSV, scans) | scans only |
+| Classification | names each document, with confidence, beside the uploader's category | yes, verified against the profile's signals |
+| Extraction | lifts declared fields with page, line and the line as printed; a value whose line cannot be found is marked unverified | yes, verified against the text |
+| **Privacy** | finds the personal data in the package, by document and by kind, by fixed patterns; a full payment card number goes to a person | no |
+| Entity Resolution | links repeated parties, goods, references; near-matches go to a person | no |
+| **Screening** | compares every party, and any vessel or place the use case names, with the watchlists; every possible match waits for a person | no |
+| Knowledge Graph | case, documents, versions, assertions, entities, provenance edges | no |
+| Evidence Completeness | mandatory, conditional, alternative evidence; shows how an absence was established | no |
+| Reference | retrieves reference content for a date with provenance; walks the hierarchy from stated characteristics | no |
+| Policy | executes the rules and shows each calculation, under a rule version | no |
+| Contradiction | compares the same fact across documents | no |
+| **Integrity** | tests each document against itself and against what the workspace remembers: declared sums, check digits, impossible dates, the same file twice, a detail that changed since the party's earlier cases | no |
+| Verification | source coverage per finding, blocks unsupported conclusions, aggregates the recommendation | no |
+| **Triage** | priority, queue and due date against the use case's service target, each with its reasons | no |
+| Counterfactual | on demand: changes one fact on a copy, reruns, reports what moved | no |
+| Correspondence | on demand: drafts an evidence request or decision note; a model may polish, every item must survive | optional |
+| Feedback | on demand: turns corrections into proposals; approval runs a regression on the bundled samples | no |
+| Case Assistant | on demand: answers from the graph and the documents, cites sources, declines what they do not hold | yes, grounded |
+| Repository | on demand: files the case and its assessment metadata to the content repository | no |
 
 The Case Orchestrator of the standalone accelerator is `docuinsights.pipeline`. On this layer the orchestrator is the
-layer's own: the flow `di_case_assessment` runs one agent per stage.
+layer's own: the flow `di_case_assessment` runs one agent per step.
 
 **What a model never does:** an evidence decision, a date or value calculation, a comparison, a classification
-conclusion, or the recommendation. Without a model (`offline`) the reading steps run on the profile's signals and
-labels and every screen says so.
+conclusion, a screening, an integrity check, the triage, or the recommendation. Without a model (`offline`) the
+reading steps run on the profile's signals and labels and every screen says so.
+
+### The four assurance agents
+
+They are in `src/docuinsights/assurance.py`, each under a contract like every other agent, and each works without a
+word in the profile. What a use case adds is declared in four short sections:
+
+```yaml
+integrity:
+  sums:          # recalculated from the document's own figures: product, sum or difference
+    - {id: invoice_arithmetic, title: The invoice's quantity and unit price give its total, kind: product,
+       parts: [supplier_invoice.quantity, supplier_invoice.unit_price], equals: supplier_invoice.invoice_total}
+  identifiers:   # tested by their check digits: iban, luhn, iso6346 (containers), lei
+    - {id: bank_account_check, title: The bank account number passes its check digits, field: supplier_invoice.bank_account, check: iban}
+  issued: [supplier_invoice.invoice_date]     # dates that cannot be in the future or implausibly old
+  stable:        # a detail that must not change between a party's cases without a person noticing
+    - {id: bank_details, title: The supplier is paid into the account it used before, role: Supplier, reference: Bank account}
+screening:
+  roles: [Carrier, Seller]                    # default: every party
+  fields: [{field: bill_of_lading.vessel, kind: vessel}, {field: bill_of_lading.port_of_loading, kind: place}]
+  threshold: 0.88                             # how alike two spellings must be to count as a possible match
+privacy:
+  not_expected: [card, national_id]           # kinds of personal data that send the case to a person (default: card)
+service:
+  target_days: 5                              # the service target the case is triaged against
+  clock: working                              # or calendar
+  starts: case.received_date
+  value: supplier_invoice.invoice_total
+  high_value: 25000
+formats:
+  dates: month_first                          # when the documents write 11/03/2026 for 3 November (default: day_first)
+```
+
+A mistake in any of these (a field that does not exist, a sum across two kinds of document, an unknown check) refuses
+the profile when it is loaded, with the reason.
+
+* **Privacy.** Email addresses, bank accounts (an IBAN is confirmed by its check digits), payment cards (prefix and
+  check digit), national identity numbers, labelled telephone numbers, dates of birth and passport numbers; a field
+  marked `personal: true` counts as the name and address of a person. Values are counted and located, never copied into
+  a finding in the clear. They are shown masked in the decision record on request (`?mask=1`), in the notification
+  another system receives, and in the knowledge base, so its export carries no account number, email address or
+  telephone number. The stored documents are never altered.
+* **Screening.** A name is compared after lower-casing it and removing accents, punctuation and legal forms. A match is
+  the same name, a name that holds every word of the listed one, or a spelling at least as alike as the threshold. The
+  lists are the installation's own: `DOCUINSIGHTS_WATCHLISTS` names JSON or CSV files, or folders of them
+  (`name, kind, aliases, reason, programme, country`; kind is `party`, `vessel` or `place`). Without that setting an
+  **invented demonstration list** is used and every screen says so. A list that was named and could not be read is
+  reported on every case and is never replaced by the invented one. A possible match waits for a person, who confirms
+  it or clears it with a reason; the answer survives later assessments.
+* **Integrity.** The agent reports what does not hold and a person concludes; it never calls a document forged. A
+  bank account counts as "used before" only once a case that states it went through clean or was approved by a
+  person, so an account that first appeared on a case nobody cleared is still a change the next time it is seen.
+* **Triage.** Fixed rules over the findings: a watchlist match goes to compliance first, an integrity alert to the
+  integrity queue, missing evidence to the evidence desk, everything else to specialist review or sign-off. Working
+  days are Monday to Friday; public holidays are not known. Nobody is assigned by the system: a person takes a case.
+
+### What leaves a case
+
+| | |
+| --- | --- |
+| Decision record | `GET /api/cases/{ref}/record` (`?mask=1` masks personal data): one self-contained printable page with what was received, every finding and its lines, the screening lists and their fingerprints, the agents and their contracts, the reviews, the audit trail and whether the ledger is intact |
+| Work queue | the Cases screen: priority, queue, due date, who has it; `GET /api/export/cases.csv` for a spreadsheet |
+| Insights | the Insights screen and `GET /api/insights`: straight-through rate, exception rate, time to decision, overrides, what is overdue, which checks stop the most cases. Every figure is counted from the case files and says how |
+| Notification | `DOCUINSIGHTS_WEBHOOK_URL`: one small JSON message when a case is assessed or decided, personal data masked, signed with `DOCUINSIGHTS_WEBHOOK_SECRET` (`X-DocuInsights-Signature: sha256=...`). A failure is written to the ledger and never touches the case |
 
 ## The foundation under the agents
 
@@ -375,6 +447,9 @@ model once at start and prints `ONLINE`, or the reason it is not answering (it s
 | `DOCUINSIGHTS_KNOWLEDGE_NAME` | the name the knowledge base carries when it is exported |
 | `DOCUINSIGHTS_KNOWLEDGE_DIR` | a folder of this installation's own knowledge bases (YAML, as in `foundation/knowledge/`), read after the ones that come with the accelerator |
 | `DOCUINSIGHTS_WORKSPACE_NAME` | the name of the customer level in the knowledge graph (`This workspace`) |
+| `DOCUINSIGHTS_WATCHLISTS` | this installation's watchlists: JSON or CSV files, or folders of them, separated like a path. When set, the invented demonstration list is no longer used (`DOCUINSIGHTS_WATCHLIST_DEMO=1` keeps it; `=0` switches it off with nothing in its place) |
+| `DOCUINSIGHTS_WEBHOOK_URL`, `DOCUINSIGHTS_WEBHOOK_SECRET` | where to tell another system that a case was assessed or decided, and the secret the message is signed with |
+| `DOCUINSIGHTS_PROFILES_DIR` | a folder of this installation's own use cases (a profile there replaces a shipped one with the same id) |
 
 To ship it as its own repository: `python scripts/export_docuinsights.py dist/docuinsights` writes a self-contained
 project (the package, a `pyproject.toml`, a README, start scripts and the server kit below). The engine needs PyYAML
@@ -391,12 +466,14 @@ proxy is never treated as local, so adding the proxy rule before the key does no
 
 * The pack loads with the others (`CAF_PACKS_DISABLED=docuinsights` switches it off). `auto_route` is false: a case
   assessment runs when a caller or a flow names it.
-* Flows: `di_case_assessment` (ten stages), `di_what_if`, `di_ask`, `di_assess_and_file`. Give `sample`
+* Flows: `di_case_assessment` (fourteen steps), `di_what_if`, `di_ask`, `di_assess_and_file`. Give `sample`
   (`supplier_invoice/mismatch`, `insurance_claim/out_of_cover`, `customs_claim/review`, ...) or `case_ref` (a case
   uploaded in the workbench). An agent run with neither works on `supplier_invoice/mismatch` and says so.
 * The same harness, contracts, memory, ledger and knowledge base apply: each stage agent of a flow runs under its
-  contract, and the verify step writes what the case taught the workspace. `di_graph` has a second action,
-  `knowledge`, that looks a name up in the workspace's knowledge base (it needs no case).
+  contract. The verify step closes the assessment: it also runs the triage that needs the recommendation and writes
+  what the case taught the workspace; the triage step then reports what was set. `di_graph` has a second action,
+  `knowledge`, that looks a name up in the workspace's knowledge base (it needs no case); `di_screening` has
+  `disposition` (a person's clear or confirm of a match, with its reason) and `di_repository` has `decision_record`.
   `di_intake` also takes a package: `reference`, `profile`, `fields` and `documents: [{name, category, content_base64}]`.
 * The workbench is at `/docuinsights/` (behind the proxy: `/agentshop/docuinsights/`; on the CX Nova VM see
   `docs/DEPLOY_VM.md`, "DocuInsights on the VM"). It signs in with the portal's token or a customer key. An assessment started there runs as `di_case_assessment`, so it appears in the portal with
@@ -451,7 +528,51 @@ Every company, reference, account and amount in `src/docuinsights/samples/` is i
 `python scripts/build_docuinsights_samples.py` regenerates the documents (needs `reportlab`; `pdftoppm` for the one
 scanned sample, which carries its transcription beside it so the demo runs without a model or an OCR engine).
 
+## How it is tested
+
+`tests/test_docuinsights_engine.py` proves the engine on the bundled cases. `tests/test_docuinsights_scenarios.py`
+puts it through what a real installation meets, and after every scenario checks the same invariants: an assessment
+completes or is refused with a plain reason; the outcome is one of three; nothing required that is missing and nothing
+that failed ever ends in "proceed"; every pass shows a verified source; every agent kept its contract or the case went
+to a person; the ledger verifies; the case, its record, its export and the workspace's numbers all render.
+
+The scenarios: every bundled case assessed twice, as PDF and as plain text; each document removed in turn; a document
+filed twice; every document uploaded under the wrong label and under none; sixteen kinds of useless or hostile file
+(blank, binary, a corrupt PDF, Arabic, Chinese, Cyrillic, a 200,000-character line, markup, a spreadsheet formula, a
+text telling the system to approve the case); a scan that no engine on the machine can read; files refused at the
+door; sixteen malformed case references; amounts and dates in continental format; dates with the month first; party
+names in six languages and five scripts; 123 documents in one case; 28 cases assessed at once; eight changes to one
+case at once; an assessment cut short by a restart; thirty names against a watchlist; a person's clear and confirm; an
+installation's own lists, and lists that fail to load; totals that are off by a penny and by a pound; nine bank
+account numbers; a changed account across seven cases; personal data in eighteen forms and thirteen things that only
+look like it; what the masked record, the export, the notification and the knowledge base carry; due dates across
+weekends; a case written by the version before; Word, Excel, email, web page and CSV; a zip bomb; 81 wrong API calls;
+an API without its key. Together the two files hold 225 tests. They read no setting of the machine they run on, and
+pass with and without an OCR engine installed.
+
 ## What is not built yet
+
+* **Line items.** A document's fields are read; the rows of a table (the lines of an invoice, the items of a packing
+  list) are not read as rows. A total is checked against the quantity and unit price a document states, not against the
+  sum of its lines.
+* **Screening** compares names. It does not screen goods (dual-use, embargoed commodities), does not read dates of
+  birth or registration numbers to tell two same-named parties apart, and knows no transliteration between alphabets
+  (a name in Cyrillic does not match its Latin spelling). The shipped list is invented; real lists are the
+  installation's to supply and keep current.
+* **Privacy** finds what is written in a recognisable form. It does not find a person described in free text, and it
+  does not classify special categories of data (health, beliefs). Masking covers the decision record on request, the
+  notification and the knowledge base; the workbench itself shows the documents as they were received, and text sent
+  to a connected model is not masked.
+* **Integrity** checks what a profile declares and five things it can check without being told. It does not examine
+  the image of a document (fonts, pasted regions, signatures), and what a PDF says about itself is reported as a sign,
+  not as a finding.
+* **Triage** counts Monday to Friday as working days and knows no public holidays, no working hours and no time
+  zones. It names a queue; it does not balance work between people.
+* **Who is who.** The standalone workbench has one API key and a name each person types for the audit trail. It has
+  no user accounts, no roles and no rule that the person who reviews is not the person who approves. Mounted on the
+  layer, the layer's sign-in and customer keys apply.
+* **Retention.** A case is kept until someone removes its folder. There is no retention period, no erasure of one
+  person's data across cases, and no legal hold.
 
 * Reviewer decisions are recorded in the case's own audit trail and the ledger, not as the layer's held approvals.
 * The knowledge base is files in the KB Forge layout with a Neo4j script; there is no graph database behind it, and

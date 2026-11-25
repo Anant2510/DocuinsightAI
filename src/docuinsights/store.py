@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,13 @@ class CaseStore:
         with self.lock:
             return json.loads(path.read_text(encoding="utf-8"))
 
+    def age(self, tenant: str, reference: str) -> float:
+        """Seconds since the case file was last written."""
+        try:
+            return max(0.0, time.time() - (self._case_dir(tenant, reference) / "case.json").stat().st_mtime)
+        except OSError:
+            return 0.0
+
     def save(self, tenant: str, case: dict[str, Any]) -> None:
         folder = self._case_dir(tenant, case["reference"])
         with self.lock:
@@ -64,10 +72,17 @@ class CaseStore:
             except (ValueError, OSError):
                 continue
             a = c.get("assessment") or {}
+            t = a.get("triage") or {}
+            found = a.get("findings") or []
+            waiting = [f for f in found if f.get("requires_human") and f.get("status") in ("fail", "review", "missing")]
             rows.append({"reference": c["reference"], "profile": c["profile"], "status": c.get("status"), "created_at": c.get("created_at"),
                          "documents": len([d for d in c.get("documents") or [] if not d.get("removed")]), "outcome": (a.get("recommendation") or {}).get("outcome"),
                          "label": (a.get("recommendation") or {}).get("label"), "assessed_at": a.get("at"), "decision": (c.get("decision") or {}).get("decision"),
-                         "title": c.get("fields", {}).get("claim_type") or c.get("fields", {}).get("title") or ""})
+                         "decided_by": (c.get("decision") or {}).get("by"), "decided_at": (c.get("decision") or {}).get("at"),
+                         "title": c.get("fields", {}).get("claim_type") or c.get("fields", {}).get("title") or "",
+                         "priority": t.get("priority"), "queue": t.get("queue_name"), "due": t.get("due"), "clock": t.get("clock"), "assigned_to": (c.get("assigned") or {}).get("to"),
+                         "open_findings": len(waiting), "watchlist_matches": sum(1 for f in waiting if f.get("agent") == "screening"),
+                         "integrity_alerts": sum(1 for f in waiting if f.get("agent") == "integrity"), "state": (c.get("progress") or {}).get("state")})
         return sorted(rows, key=lambda r: r.get("created_at") or "", reverse=True)
 
     def write_file(self, tenant: str, reference: str, doc_id: str, version: int, name: str, data: bytes) -> str:

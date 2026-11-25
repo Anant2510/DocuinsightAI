@@ -27,7 +27,7 @@ from .model import ModelError
 from .throttle import Budget, Throttled
 
 RETRYABLE = (TimeoutError, ConnectionError)
-SECTIONS = ("documents", "entities", "graph", "findings", "references", "recommendation")
+SECTIONS = ("documents", "entities", "graph", "findings", "references", "recommendation", "privacy", "screening", "triage")
 LASTING = ("documents",)   # kept on the case between assessments; the rest is rebuilt by every assessment
 
 
@@ -99,7 +99,8 @@ def fingerprints(case: dict[str, Any], w: dict[str, Any] | None) -> dict[str, st
              "versions": [{"v": v.get("v"), "sha256": v.get("sha256"), "method": v.get("method"), "chars": len(v.get("text") or ""), "checks": v.get("checks")} for v in d.get("versions") or []]}
             for d in case.get("documents") or []]
     return {"documents": digest(docs), "entities": digest([w.get("entities"), w.get("unresolved"), w.get("recall")]), "graph": digest(w.get("graph")), "findings": digest(w.get("findings")),
-            "references": digest(w.get("references")), "recommendation": digest(w.get("recommendation"))}
+            "references": digest(w.get("references")), "recommendation": digest(w.get("recommendation")),
+            "privacy": digest(w.get("privacy")), "screening": digest(w.get("screening")), "triage": digest(w.get("triage"))}
 
 
 class Harness:

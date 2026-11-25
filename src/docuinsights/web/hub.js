@@ -3,7 +3,7 @@
 (function () {
   "use strict";
   const root = document.getElementById("app"), BASE = root.dataset.base || "";
-  const S = { cfg: null, cases: [], c: null, view: "home", sel: {}, chat: false, chatLog: [], cf: null, draft: null, fb: null, timer: null, filter: { status: "attention", family: "all" }, layers: { document: true, entity: true, reference: true, reasoning: false, assertion: false }, k: { ov: null, g: null, m: null, e: null, view: "explore", layout: "layered", open: ["industry", "domain", "solution", "customer"], drill: [], grp: null, tf: null, auto: true, frame: "", focus: null, anchor: null, grew: null, reveal: null, cw: null, left: null, labels: true, every: false, hideT: [], hideR: [], hits: null, q: "", place: "", more: null, back: null }, ck: null, pf: null,
+  const S = { cfg: null, cases: [], ins: null, q: { show: "open", sort: "urgency" }, c: null, view: "home", sel: {}, chat: false, chatLog: [], cf: null, draft: null, fb: null, timer: null, filter: { status: "attention", family: "all" }, layers: { document: true, entity: true, reference: true, reasoning: false, assertion: false }, k: { ov: null, g: null, m: null, e: null, view: "explore", layout: "layered", open: ["industry", "domain", "solution", "customer"], drill: [], grp: null, tf: null, auto: true, frame: "", focus: null, anchor: null, grew: null, reveal: null, cw: null, left: null, labels: true, every: false, hideT: [], hideR: [], hits: null, q: "", place: "", more: null, back: null }, ck: null, pf: null,
     orch: { t: null, playing: false, speed: 1, auto: false, sel: null, timer: null } };
 
   // ---------------------------------------------------------------------------------------------- helpers
@@ -23,14 +23,29 @@
   const KEYED = root.dataset.auth !== "host";
   let ownKey = "";
   const token = () => { try { return KEYED ? ownKey || sessionStorage.getItem("docuinsights.key") || "" : localStorage.getItem("cxnova.shop.admin") || localStorage.getItem("cxnova.shop.token") || ""; } catch (e) { return KEYED ? ownKey : ""; } };
+  // Who is at the keyboard, as the audit trail will name them. On its own the workbench asks once and remembers; mounted in a host, the host says who it is.
+  const who = () => { try { return KEYED ? localStorage.getItem("docuinsights.user") || "" : ""; } catch (e) { return ""; } };
+  const signed = (headers) => { const t = token(); if (t) headers.Authorization = "Bearer " + t; if (who()) headers["X-DocuInsights-User"] = encodeURIComponent(who()); return headers; };
   async function api(path, body, method) {
-    const headers = {}; const t = token(); if (t) headers.Authorization = "Bearer " + t;
+    const headers = signed({});
     if (body !== undefined) headers["Content-Type"] = "application/json";
     const res = await fetch(BASE + "/api/" + path, { method: method || (body !== undefined ? "POST" : "GET"), headers, body: body !== undefined ? JSON.stringify(body) : undefined });
     let data = null; try { data = await res.json(); } catch (e) { data = null; }
     if (!res.ok) { const err = new Error((data && data.detail) || res.status + " " + res.statusText); err.status = res.status; throw err; }
     return data;
   }
+  async function raw(path) {
+    const res = await fetch(BASE + "/api/" + path, { headers: signed({}) });
+    if (!res.ok) { let d = null; try { d = await res.json(); } catch (e) { d = null; } const err = new Error((d && d.detail) || res.status + " " + res.statusText); err.status = res.status; throw err; }
+    return res.blob();
+  }
+  const openRecord = (masked) => run(async () => {   // the decision record is a page of its own: fetched with the credential, opened beside the workbench
+    const w = window.open("", "_blank"); const blob = await raw("cases/" + encodeURIComponent(S.c.reference) + "/record" + (masked ? "?mask=1" : ""));
+    const url = URL.createObjectURL(new Blob([await blob.text()], { type: "text/html" }));
+    if (w) w.location = url; else { const a = h("a", { href: url, download: "decision-record-" + S.c.reference + (masked ? "-masked" : "") + ".html" }); document.body.appendChild(a); a.click(); a.remove(); toast("The decision record was downloaded (the browser blocked a new tab)."); }
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  });
+  const download = (path, name) => run(async () => { const url = URL.createObjectURL(await raw(path)); const a = h("a", { href: url, download: name }); document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000); });
   function toast(msg) { const t = h("div", { class: "toast", role: "status" }, msg); document.body.appendChild(t); setTimeout(() => t.remove(), 4200); }
   const run = (fn) => async (e) => { if (e && e.preventDefault) e.preventDefault(); try { await fn(e); } catch (err) { if (err.status === 401) return signIn(err.message); toast(err.message); } };
   const pill = (status, label) => h("span", { class: "pill " + (status || "") }, label || status);
@@ -56,7 +71,10 @@
         return h("label", { class: "f" }, h("span", null, f.label), el);
       });
       box = h("div", { class: "modal", onclick: (e) => { if (e.target === box) close(null); } }, h("div", { role: "dialog", "aria-label": title },
-        h("form", { class: "stack", onsubmit: (e) => { e.preventDefault(); close(vals); } }, h("h3", { style: "font-size:16px" }, title), inputs,
+        h("form", { class: "stack", onsubmit: (e) => { e.preventDefault();
+          const short = fields.findIndex((f) => f.min && String(vals[f.k] || "").trim().length < f.min);   // what was typed stays in the dialog
+          if (short >= 0) { toast(fields[short].need || "Fill in: " + fields[short].label); const el = inputs[short].querySelector("input,select,textarea"); if (el) el.focus(); return; }
+          close(vals); } }, h("h3", { style: "font-size:16px" }, title), inputs,
           h("div", { class: "row" }, h("button", { class: "btn primary", type: "submit" }, submit || "Save"), h("button", { class: "btn", type: "button", onclick: () => close(null) }, "Cancel")))));
       document.body.appendChild(box); const first = box.querySelector("input,select,textarea"); if (first) first.focus();
     });
@@ -98,13 +116,14 @@
   function openSource(s) { if (!s.doc || s.doc === "case") return; S.view = "documents"; S.sel.doc = s.doc; S.sel.line = s.page ? { page: s.page, line: s.line } : null; render(); }
 
   // ---------------------------------------------------------------------------------------------- shell
-  const TOP = [["home", "Home"], ["cases", "Cases"], ["knowledge", "Knowledge"], ["agents", "Agents"], ["platform", "How it is governed"]];
+  const TOP = [["home", "Home"], ["cases", "Cases"], ["insights", "Insights"], ["knowledge", "Knowledge"], ["agents", "Agents"], ["platform", "How it is governed"]];
   const mapQuery = () => "open=" + S.k.open.join(",") + S.k.drill.map((d) => "&drill=" + encodeURIComponent(d)).join("");
   const top = (view) => run(async () => {   // a screen of the workspace (no case open): load what it shows, then draw it
     clearTimeout(S.timer); clearInterval(S.orch.timer); S.orch.playing = false; S.c = null; S.sel = {}; kHash(null); if (view !== "knowledge") S.k.back = null;
     if (view === "home" || view === "cases") S.cases = await api("cases");
     if (view === "knowledge") { S.k.ov = await api("knowledge"); S.k.m = await api("knowledge/map?" + mapQuery()); Object.assign(S.k, { e: null, grp: null, hits: null, tf: null, auto: true, focus: null, anchor: null, grew: null, reveal: null }); }
     if (view === "platform") S.pf = await api("platform");
+    if (view === "insights") S.ins = await api("insights");
     S.view = view; render(); window.scrollTo(0, 0);
   });
   function render() {
@@ -112,11 +131,14 @@
     const bar = h("header", { class: "top" },
       h("button", { class: "brand", onclick: top("home") }, h("img", { src: BASE + "/static/mark.svg", alt: "" }), h("b", null, S.cfg.product)),
       h("nav", { class: "tabs", "aria-label": "Workspace" }, TOP.map(([id, label]) => h("button", { "aria-current": String(!S.c && (S.view === id || (id === "cases" && S.view === "new"))), onclick: top(id) }, label))),
-      S.c ? h("span", { class: "ws" }, p.brand.workspace || p.name, p.brand.client_label ? " · " + p.brand.client_label : "") : null,
       h("span", { class: "right" }), h("span", { class: "tag", title: "The model used for reading and narrative. Rules and the recommendation are code." }, S.cfg.model.offline ? "No model: patterns and rules" : "Model: " + S.cfg.model.model + (S.cfg.model.status ? " · " + S.cfg.model.status : "")),
       h("span", { class: "tag" }, "Repository: " + S.cfg.repository.kind), S.cfg.links.portal ? h("a", { class: "tag", href: S.cfg.links.portal, style: "text-decoration:none" }, "CX Nova portal") : null,
-      h("span", { class: "tag demo" }, "Demonstration · synthetic data"));
-    const views = { home, cases, new: newCase, agents, knowledge, platform, summary, documents, graph, evidence, consistency, reference, policy, provenance, whatif, monitor, decision, audit };
+      KEYED ? h("button", { class: "tag", style: "border:0;cursor:pointer", title: "The name the audit trail records for what you do here. It is a label, not a sign-in: the API key is the sign-in.", onclick: run(async () => {
+        const v = await form("Your name, as the audit trail will record it", [{ k: "name", label: "Name", value: who() }], "Save"); if (!v) return;
+        try { if (v.name.trim()) localStorage.setItem("docuinsights.user", v.name.trim().slice(0, 60)); else localStorage.removeItem("docuinsights.user"); } catch (e) { /* private window */ }
+        S.cfg = await api("config"); render(); }) }, S.cfg.actor && S.cfg.actor !== "caseworker" ? S.cfg.actor : "Set your name") : null,
+      h("span", { class: "tag demo" }, "Demonstration, synthetic data"));
+    const views = { home, cases, new: newCase, insights, agents, knowledge, platform, summary, documents, graph, evidence, consistency, assurance, reference, policy, provenance, whatif, monitor, decision, audit };
     const main = h("main", { class: "main" + (S.view === "knowledge" && !S.c && S.k.view !== "manage" ? " full" : "") });
     if (S.c && !a && !["monitor", "documents"].includes(S.view)) S.view = "monitor";
     add(main, (views[S.view] || home)());
@@ -130,21 +152,34 @@
     const item = (id, label, badge) => h("button", { "aria-current": String(S.view === id), onclick: go(id) }, label, badge);
     const st = (f) => ["fail", "missing", "review"].includes(f.status);
     return h("nav", { class: "rail", "aria-label": "Case" },
-      h("div", { class: "case" }, h("div", { class: "ref" }, S.c.reference), h("div", { class: "st" }, running ? "Assessing…" : S.c.status), S.c.sample ? h("div", { class: "st" }, "Sample: " + S.c.sample.title) : null),
+      h("div", { class: "case" }, h("div", { class: "st", style: "margin:0 0 4px" }, (prof().brand.workspace || prof().name) + (prof().brand.client_label ? ", " + prof().brand.client_label : "")), h("div", { class: "ref" }, S.c.reference), h("div", { class: "st" }, running ? "Assessing…" : S.c.status), S.c.sample ? h("div", { class: "st" }, "Sample: " + S.c.sample.title) : null,
+        a && a.triage ? h("div", { class: "tri" }, pill(a.triage.priority, cap(a.triage.priority) + " priority"), dueText(a.triage.due, S.c.due, !!S.c.decision)) : null,
+        a ? h("div", { class: "who" }, S.c.assigned ? ["With " + S.c.assigned.to + " ", h("button", { onclick: assign }, "change")] : ["Nobody has taken it ", h("button", { onclick: assign }, "take it")]) : null),
       h("h4", null, "Case"), item("summary", "Intelligence summary"), item("documents", "Documents and classification", n(S.c.documents.filter((d) => !d.removed && d.classification && !d.classification.agrees && !d.review).length, "warn")),
       item("evidence", "Evidence completeness", n(count((f) => f.family === "evidence" && f.status === "missing"), "bad")),
       item("consistency", "Cross-document consistency", n(count((f) => f.agent === "contradiction" && st(f)), "bad")),
+      item("assurance", "Screening, integrity, privacy", n(count((f) => ASSURE.includes(f.agent) && st(f)), "bad")),
       prof().reference_sources.length ? item("reference", "Classification assessment", n(count((f) => f.agent === "reference" && f.status === "review"), "warn")) : null,
       item("policy", "Policy and temporal checks", n(count((f) => f.agent === "policy" && st(f)), "bad")),
       h("h4", null, "Explain"), item("graph", "Entity relationship graph"), item("provenance", "Reasoning and provenance"), item("whatif", "Counterfactual simulator"),
       h("h4", null, "Operate"), item("monitor", "Agent orchestration", running ? h("span", { class: "spin right" }) : null), item("decision", "Decision workspace", n(a && !S.c.decision ? 1 : 0, "warn")), item("audit", "Feedback and audit"));
   }
 
+  const ASSURE = ["screening", "integrity", "privacy"];
+  const cap = (x) => String(x || "").replace(/^./, (c) => c.toUpperCase());
+  function dueText(due, st, decided) {   // a due date as a person reads it: how long is left, and whether it has passed
+    if (!due) return h("span", { class: "due muted" }, "–");
+    if (decided || !st || st.days_left === undefined) return h("span", { class: "due" }, "due " + due);
+    const d = st.days_left;
+    return h("span", { class: "due" + (st.overdue ? " over" : st.due_soon ? " soon" : ""), title: "Due " + due }, st.overdue ? "overdue by " + -d + (d === -1 ? " day" : " days") : d === 0 ? "due today" : d === 1 ? "due tomorrow" : d + " days left");
+  }
+  const assign = run(async () => { const v = await form("Who is working " + S.c.reference + "?", [{ k: "to", label: "Name (leave empty to hand it back to its queue)", value: (S.c.assigned || {}).to || S.cfg.actor || "" }], "Save"); if (v) { setCase(await api("cases/" + S.c.reference + "/assign", { to: v.to })); S.cases = await api("cases"); } });
+
   // ---------------------------------------------------------------------------------------------- home, new case, agents
   const tryIt = (p, s) => run(async () => { const c = await api("samples", { profile: p.id, sample: s.id }); S.cases = await api("cases"); S.orch = { t: null, playing: false, speed: 1, auto: true, sel: null, timer: null }; open(c.reference, "monitor"); });
   const outcomePill = (c) => (c.label ? pill({ proceed: "pass", review: "fail", request_evidence: "review" }[c.outcome], c.label) : "–");
   function home() {
-    const how = [["Put the documents in", "A case is a handful of documents and a few facts about it. PDFs, scans or text."],
+    const how = [["Put the documents in", "A case is a handful of documents and a few facts about it: PDFs, Word and Excel files, emails with their attachments, scans or text."],
       ["Agents read and link them", "Each document is named, its facts are lifted with the page and line they came from, and the same company or reference number is joined across documents."],
       ["Rules check them", "Is anything missing? Do the dates and amounts hold? Do the documents agree with each other? These checks are code, never a model's opinion."],
       ["A person decides", "You get one of three recommendations with its reasons. Every reason opens the line it rests on. Nothing is decided for you."]];
@@ -154,40 +189,65 @@
       ["Knowledge graph", "What each industry works under, what each use case asks for and what every case taught, as one graph in the KB Forge format. Every finding opens the exact node it rests on.", "knowledge"],
       ["Evidence provenance", "Every conclusion points to a line of a document, and every action is in a tamper-evident ledger.", "platform"],
       ["Throttling", "Model calls are rate limited and budgeted per agent. At the limit an agent falls back; it does not fail.", "platform"]];
-    return [h("div", { class: "hero" }, h("h1", null, "Give it the documents. Get back a recommendation you can check."),
-        h("p", null, S.cfg.product + " reads a set of documents, links what they say, checks them against your rules, and tells a person what to do next, with the line behind every conclusion."),
-        h("div", { class: "row" }, h("button", { class: "btn accent", onclick: () => document.getElementById("usecases").scrollIntoView({ behavior: "smooth" }) }, "Try a use case"), h("button", { class: "btn", onclick: go("new") }, "Use my own documents"))),
+    const checks = [["Is anything missing?", "Every document the use case requires, always or in stated circumstances."], ["Do the dates and amounts hold?", "Limits, periods and tolerances, each under a rule with a version."],
+      ["Do the documents agree?", "The same party, quantity, reference and goods, as each document states them."], ["Does each document hold together?", "Its own sums, its dates, check digits, the same file twice, bank details that changed."],
+      ["Is anyone on a watchlist?", "Every party, vessel and port, allowing for spelling. A match always waits for a person."], ["What personal data is in it?", "Found by document and by kind, and masked in whatever leaves the system."]];
+    const inv = S.cfg.profiles.find((x) => x.id === "supplier_invoice"), demo = inv && inv.samples.find((x) => x.id === "payment_change");
+    return [h("div", { class: "hero" }, h("div", null, h("h1", null, "Give it the documents. Get back a recommendation you can check."),
+        h("p", { class: "say" }, S.cfg.product + " reads a set of documents, links what they say, checks them against your rules, and tells a person what to do next, with the line behind every conclusion."),
+        h("div", { class: "row" }, h("button", { class: "btn primary", onclick: () => document.getElementById("usecases").scrollIntoView({ behavior: "smooth" }) }, "Try a use case"), h("button", { class: "btn", onclick: go("new") }, "Use my own documents"))),
+        demo ? h("button", { class: "file", onclick: tryIt(inv, demo), title: "Open this bundled case and watch the agents work on it" },
+          h("div", { class: "hd" }, h("span", { class: "seal review" }, "!"), h("div", null, h("b", null, "Hold for review"), h("span", null, "Supplier invoice AP-2026-004702, three documents, read in under a second"))),
+          h("div", { class: "ln" }, h("i", null, "✕"), h("div", null, "The invoice does not add up: 600 at GBP 9.50 is 5,700.00, and it asks for 5,790.00.", h("q", null, "invoice_new_account.pdf, page 1, line 10"))),
+          h("div", { class: "ln" }, h("i", null, "!"), h("div", null, "It asks to be paid into an account this supplier has not used before.", h("q", null, "invoice_new_account.pdf, page 1, line 13, against an earlier case"))),
+          h("div", { class: "ln" }, h("i", { class: "ok" }, "✓"), h("div", null, "Order, invoice and receipt agree on supplier, goods and quantity, so a three-way match alone would have paid it.", h("q", null, "three documents, eleven lines"))),
+          h("div", { class: "go" }, "Open this case")) : null),
       h("h2", { class: "sub" }, "How it works"),
       h("div", { class: "grid g4" }, how.map(([t, d], i) => h("div", { class: "how" }, h("span", { class: "no" }, i + 1), h("h3", null, t), h("p", null, d)))),
       h("h2", { class: "sub", id: "usecases" }, "Pick a use case"),
       h("p", { class: "lead" }, "The same agents run every one of them. A use case is a configuration: the kinds of document, the evidence it asks for and its rules. Each comes with invented sample cases to try."),
       h("div", { class: "grid g3", style: "align-items:start" }, S.cfg.profiles.map((p) => h("div", { class: "uc" }, h("div", { class: "row" }, p.sector ? h("span", { class: "sector" }, p.sector) : null),
-        h("h3", null, p.name), h("p", null, p.plain || p.description), h("div", { class: "small muted" }, p.document_types.length + " kinds of document · " + p.rules.length + " rules · " + (p.consistency || []).length + " cross-checks"),
-        h("div", { class: "samples" }, p.samples.map((s) => h("button", { class: "sample", onclick: tryIt(p, s), title: s.story }, h("b", null, s.title), h("span", null, s.story), h("i", null, "Try it →")))),
+        h("h3", null, p.name), h("p", null, p.plain || p.description), h("div", { class: "small muted" }, p.document_types.length + " kinds of document, " + p.rules.length + " rules, " + (p.consistency || []).length + " cross-checks, " + (p.assurance || []).filter((x) => x.family === "integrity").length + " integrity checks"),
+        h("div", { class: "samples" }, p.samples.map((s) => h("button", { class: "sample", onclick: tryIt(p, s), title: s.story }, h("b", null, s.title), h("span", null, s.story), h("i", null, "Try it")))),
         h("button", { class: "btn sm ghost", onclick: () => { S.sel.draft = { profile: p.id, reference: "", fields: {}, files: [] }; go("new")(); } }, "Use my own documents"))),
         h("div", { class: "uc own" }, h("div", { class: "row" }, h("span", { class: "sector" }, "Any industry")), h("h3", null, "Your use case"),
           h("p", null, "Claims, onboarding, lending, procurement, compliance: anything that arrives as a set of documents to check."), h("p", { class: "small muted" }, "A new use case is one configuration file. No code changes, no new agents."))),
+      h("h2", { class: "sub" }, "What every case is checked for"),
+      h("div", { class: "grid g3" }, checks.map(([t, d]) => h("div", { class: "found flat" }, h("h3", null, t), h("p", null, d)))),
       h("h2", { class: "sub" }, "What every agent runs on"),
       h("div", { class: "grid g3" }, base.map(([t, d, v]) => h("button", { class: "found", onclick: top(v) }, h("h3", null, t), h("p", null, d)))),
       S.cases.length ? [h("h2", { class: "sub" }, "Recent cases"), cardOf(null, h("table", null, h("tbody", null, S.cases.slice(0, 5).map((c) => h("tr", { class: "click", onclick: run(() => open(c.reference)) }, h("td", { class: "mono" }, c.reference),
-        h("td", null, (S.cfg.profiles.find((p) => p.id === c.profile) || {}).name || c.profile), h("td", null, outcomePill(c)), h("td", { class: "small muted" }, when(c.assessed_at)))))), h("button", { class: "btn sm ghost", style: "margin-top:6px", onclick: top("cases") }, "All cases"))] : null];
+        h("td", null, (S.cfg.profiles.find((p) => p.id === c.profile) || {}).name || c.profile), h("td", null, outcomePill(c)), h("td", null, c.priority ? pill(c.priority, cap(c.priority)) : null), h("td", { class: "small muted" }, when(c.assessed_at)))))), h("button", { class: "btn sm ghost", style: "margin-top:6px", onclick: top("cases") }, "The work queue"))] : null];
   }
   function cases() {
-    const by = (o) => S.cases.filter((c) => c.outcome === o).length;
-    return [section("Cases", "Every case in this workspace. Open one, or start a new one."),
-      h("div", { class: "grid g4", style: "margin-bottom:16px" }, [["Cases", S.cases.length], ["Ready", by("proceed")], ["Something to request", by("request_evidence")], ["Referred to a person", by("review")]].map(([l, v]) => h("div", { class: "tile" }, h("b", null, v), h("span", null, l)))),
-      h("div", { class: "row", style: "margin-bottom:14px" }, h("button", { class: "btn primary", onclick: go("new") }, "Create a case"), h("button", { class: "btn", onclick: top("home") }, "Try a sample")),
-      cardOf(null, S.cases.length ? h("table", null, h("thead", null, h("tr", null, ["Reference", "Use case", "Documents", "Recommendation", "Status", "Assessed"].map((x) => h("th", null, x)))),
-        h("tbody", null, S.cases.map((c) => h("tr", { class: "click", onclick: run(() => open(c.reference)) }, h("td", { class: "mono" }, c.reference), h("td", null, (S.cfg.profiles.find((p) => p.id === c.profile) || {}).name || c.profile), h("td", null, c.documents),
-          h("td", null, outcomePill(c)), h("td", null, c.status), h("td", { class: "small muted" }, when(c.assessed_at)))))) : h("p", { class: "muted" }, "No cases yet. Try a sample from the home page, or create a case with your own documents."))];
+    const waiting = S.cases.filter((c) => c.outcome && !c.decision), q = S.q;
+    const shows = { open: ["Open", waiting], overdue: ["Overdue", waiting.filter((c) => c.overdue)], soon: ["Due today or tomorrow", waiting.filter((c) => c.due_soon)], alerts: ["Watchlist or integrity", waiting.filter((c) => c.watchlist_matches || c.integrity_alerts)],
+      mine: ["With me", waiting.filter((c) => c.assigned_to && c.assigned_to === S.cfg.actor)], decided: ["Decided", S.cases.filter((c) => c.decision)], all: ["All cases", S.cases] };
+    const rank = { urgent: 0, high: 1, normal: 2, low: 3 }, left = (c) => (c.days_left === undefined || c.days_left === null ? 9999 : c.days_left);
+    const sorts = { urgency: (x, y) => (rank[x.priority] === undefined ? 9 : rank[x.priority]) - (rank[y.priority] === undefined ? 9 : rank[y.priority]) || left(x) - left(y), due: (x, y) => left(x) - left(y), newest: (x, y) => String(y.created_at).localeCompare(String(x.created_at)) };
+    const rows = [...shows[q.show][1]].sort(q.show === "decided" || q.show === "all" ? sorts.newest : sorts[q.sort] || sorts.urgency);
+    const tile = (id, hot) => h("button", { class: "tile click" + (q.show === id ? " on" : "") + (hot && shows[id][1].length ? " hot" : ""), onclick: () => { q.show = id; render(); } }, h("b", null, shows[id][1].length), h("span", null, shows[id][0]));
+    return [section("Cases", "The work queue of this workspace. Each assessed case has a priority, a queue and a due date, set by fixed rules with their reasons. Nobody is assigned by the system: a person takes a case."),
+      h("div", { class: "grid g6", style: "margin-bottom:16px" }, tile("open"), tile("overdue", true), tile("soon"), tile("alerts", true), tile("mine"), tile("decided")),
+      h("div", { class: "qbar" }, h("button", { class: "btn primary", onclick: go("new") }, "Create a case"), h("button", { class: "btn", onclick: top("home") }, "Try a sample"),
+        h("div", { class: "seg" }, [["urgency", "Most urgent first"], ["due", "Soonest due"], ["newest", "Newest"]].map(([k, l]) => h("button", { "aria-pressed": String(q.sort === k), onclick: () => { q.sort = k; render(); } }, l))),
+        h("button", { class: "btn sm ghost", onclick: () => { q.show = "all"; render(); } }, "Show all " + S.cases.length),
+        h("button", { class: "btn right", disabled: !S.cases.length, onclick: download("export/cases.csv", "docuinsights-cases.csv"), title: "The queue as a spreadsheet opens it" }, "Export as CSV")),
+      cardOf(null, rows.length ? h("table", null, h("thead", null, h("tr", null, ["Reference", "Use case", "Recommendation", "Priority", "Queue", "Due", "With", "Status"].map((x) => h("th", null, x)))),
+        h("tbody", null, rows.map((c) => h("tr", { class: "click", onclick: run(() => open(c.reference)) }, h("td", { class: "mono" }, c.reference), h("td", null, (S.cfg.profiles.find((p) => p.id === c.profile) || {}).name || c.profile),
+          h("td", null, outcomePill(c), c.watchlist_matches ? h("div", { class: "small", style: "color:var(--bad);margin-top:3px" }, c.watchlist_matches + " watchlist match" + (c.watchlist_matches > 1 ? "es" : "")) : null,
+            c.integrity_alerts ? h("div", { class: "small", style: "color:var(--bad);margin-top:3px" }, c.integrity_alerts + " integrity alert" + (c.integrity_alerts > 1 ? "s" : "")) : null),
+          h("td", null, c.priority ? pill(c.priority, cap(c.priority)) : h("span", { class: "muted" }, "–")), h("td", { class: "small" }, c.queue || "–"), h("td", null, dueText(c.due, c, !!c.decision)),
+          h("td", { class: "small" }, c.assigned_to || h("span", { class: "muted" }, "–")), h("td", { class: "small" }, c.state === "running" ? [h("span", { class: "spin" }), " assessing"] : c.status)))))
+        : h("p", { class: "muted" }, S.cases.length ? "No case in this view." : "No cases yet. Try a sample from the home page, or create a case with your own documents."))];
   }
   function newCase() {
     const d = S.sel.draft || (S.sel.draft = { profile: S.cfg.profiles[0].id, reference: "", fields: {}, files: [] });
     S.sel.profile = d.profile; const p = prof();
     const pick = async (files) => { for (const f of files) { const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1]); r.onerror = rej; r.readAsDataURL(f); }); d.files.push({ name: f.name, size: f.size, category: "", content_base64: b64 }); } render(); };
     const drop = h("div", { class: "drop", tabindex: 0, onclick: () => fileInput.click(), ondragover: (e) => { e.preventDefault(); drop.classList.add("over"); }, ondragleave: () => drop.classList.remove("over"), ondrop: (e) => { e.preventDefault(); pick(e.dataTransfer.files); } },
-      "Drop the evidence package here, or click to choose files", h("div", { class: "small" }, "PDF, PNG, JPEG or text, up to 15 MB each"));
-    const fileInput = h("input", { type: "file", multiple: true, accept: ".pdf,.png,.jpg,.jpeg,.txt", style: "display:none", onchange: (e) => pick(e.target.files) });
+      "Drop the evidence package here, or click to choose files", h("div", { class: "small" }, "PDF, Word, Excel, email (with its attachments), web page, text, CSV or a scan (PNG, JPEG), up to " + (S.cfg.max_file_mb || 15) + " MB each"));
+    const fileInput = h("input", { type: "file", multiple: true, accept: (S.cfg.accepts || [".pdf", ".png", ".jpg", ".jpeg", ".txt"]).join(","), style: "display:none", onchange: (e) => pick(e.target.files) });
     return [section("Create a case", "Register the case, give the case facts the rules need, and upload the evidence package. Each file is kept as an immutable version with its hash."),
       h("form", { class: "stack", onsubmit: run(async () => { const c = await api("cases", { reference: d.reference, profile: d.profile, fields: d.fields, documents: d.files, assess: true }); S.sel.draft = null; S.cases = await api("cases"); open(c.reference, "monitor"); }) },
         cardOf("Case", h("div", { class: "grid g3" }, h("label", { class: "f" }, h("span", null, "Use case"), h("select", { onchange: (e) => { d.profile = e.target.value; d.fields = {}; render(); } }, S.cfg.profiles.map((x) => h("option", { value: x.id, selected: x.id === d.profile }, x.name)))),
@@ -197,6 +257,52 @@
           h("td", null, h("select", { onchange: (e) => (f.category = e.target.value) }, h("option", { value: "" }, "Other documents"), p.document_types.map((t) => h("option", { value: t.id, selected: f.category === t.id }, t.name)))), h("td", null, h("button", { class: "btn sm ghost", type: "button", onclick: () => { d.files.splice(i, 1); render(); } }, "Remove")))))) : null),
         h("div", { class: "row" }, h("button", { class: "btn primary", type: "submit", disabled: !d.files.length }, "Create and assess"), h("button", { class: "btn", type: "button", onclick: top("cases") }, "Cancel")))];
   }
+  // ---------------------------------------------------------------------------------------------- insights: the workspace measured from its own case files
+  function insights() {
+    const d = S.ins; if (!d) return [section("Insights", "Loading the workspace's numbers…")];
+    const r = d.rates, pct = (x) => (x.value === null || x.value === undefined ? "–" : x.value + "%"), o = d.outcomes, n = d.assessed;
+    const NAMES = { proceed: "Ready", request_evidence: "Something to request", review: "Referred to a person" }, VAR = { proceed: "--v-go", request_evidence: "--v-ask", review: "--v-hold" }, KEYS = ["proceed", "request_evidence", "review"];
+    const stat = (value, label, how, hot) => h("div", { class: "card stat", title: how }, h("b", { style: hot ? "color:var(--bad)" : null }, value), h("span", null, label), h("small", null, how));
+    const legend = (counts) => h("div", { class: "legend" }, KEYS.map((k) => h("span", null, h("i", { style: "background:var(" + VAR[k] + ")" }), NAMES[k] + " ", h("b", null, counts[k]))));
+    const refresh = h("button", { class: "btn sm", onclick: run(async () => { S.ins = await api("insights"); render(); toast("Counted again"); }) }, "Count again");
+    if (!n) return [section("Insights", "The workspace measured from its own case files: how many cases go straight through, how many need a person and why, how long a decision takes, what is due."),
+      cardOf(null, h("p", { class: "muted" }, "No case has been assessed yet, so there is nothing to count. Try a sample from the home page, then come back."), h("div", { class: "row", style: "margin-top:10px" }, h("button", { class: "btn primary", onclick: top("home") }, "Try a sample"), refresh))];
+    const t = d.time.to_decision_hours, fmtH = (x) => (x === null || x === undefined ? "–" : x < 1 ? Math.round(x * 60) + " min" : x < 48 ? x + " h" : Math.round(x / 24) + " days");
+    const most = Math.max(1, ...d.daily.map((x) => x.proceed + x.request_evidence + x.review)), top3 = Math.max(1, ...d.reasons.map((x) => x.cases)), topQ = Math.max(1, ...d.service.queues.map((x) => x.cases));
+    const peak = d.daily.reduce((b, x, i) => (x.proceed + x.request_evidence + x.review > b.v ? { v: x.proceed + x.request_evidence + x.review, i } : b), { v: 0, i: -1 }).i;
+    const dayName = (iso) => new Date(iso + "T12:00:00").toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+    const agentName = (id) => { const a = S.cfg.agents.find((x) => x.id === id); return a ? short(a.name) : id; };
+    return [h("div", { class: "page-h" }, h("h1", null, "Insights"), h("span", { class: "right" }, refresh)),
+      h("p", { class: "lead" }, "The workspace measured from its own case files. Nothing here is estimated: every figure is counted, and each says how. Counted from " + d.cases + (d.of_total > d.cases ? " of " + d.of_total : "") + " case(s), " + when(d.as_of) + "."),
+      h("div", { class: "viz" },
+        h("div", { class: "grid g4" }, stat(pct(r.straight_through), "go straight through", r.straight_through.how), stat(pct(r.exception), "are referred to a person", r.exception.how), stat(fmtH(t.median), "median time to a decision", t.how + (t.of ? " Counted on " + t.of + "." : " None decided yet.")),
+          stat(d.service.overdue, "open and overdue", d.service.how, d.service.overdue > 0)),
+        h("div", { class: "grid g2", style: "margin-top:14px" },
+          cardOf("How " + n + " assessed case(s) came out", h("div", { class: "stackbar", role: "img", "aria-label": KEYS.map((k) => NAMES[k] + " " + o[k]).join(", ") }, KEYS.filter((k) => o[k]).map((k) => h("i", { style: "flex:" + o[k] + ";background:var(" + VAR[k] + ")", title: NAMES[k] + ": " + o[k] + " of " + n }))), legend(o),
+            h("table", { style: "margin-top:10px" }, h("tbody", null, [["Something had to be requested", pct(r.evidence_request), r.evidence_request.how], ["Decisions that differ from the recommendation", pct(r.override), r.override.how + " Counted on " + r.override.of + "."],
+              ["Extracted values a reviewer changed", pct(r.corrected_values), r.corrected_values.how], ["Agent runs that kept their contract", pct(r.contracts_kept), r.contracts_kept.how + " Counted on " + r.contracts_kept.of + "."]].map(([k, v, how]) => h("tr", { title: how }, h("td", null, k, h("div", { class: "small muted" }, how)), h("td", { style: "text-align:right;font-weight:650;white-space:nowrap" }, v)))))),
+          cardOf(d.open + " open case(s) against their due dates", h("div", { class: "grid g3" }, [["Overdue", d.service.overdue, true], ["Due today or tomorrow", d.service.due_soon], ["On track", d.service.on_track]].map(([l, v, hot]) => h("div", null, h("b", { style: "display:block;font:680 24px/1.1 var(--display);" + (hot && v ? "color:var(--bad)" : "") }, v), h("span", { class: "small muted" }, l)))),
+            h("h3", { style: "margin:16px 0 4px" }, "By queue"), d.service.queues.length ? d.service.queues.map((q) => h("div", { class: "hbar" }, h("span", { class: "nm" }, q.queue), h("span", { class: "tr" }, h("i", { style: "width:" + Math.round((q.cases / topQ) * 100) + "%" })), h("b", null, q.cases))) : h("p", { class: "muted small" }, "Nothing is open."),
+            d.service.open_cases.length ? h("details", { style: "margin-top:10px" }, h("summary", { class: "small muted", style: "cursor:pointer" }, "The open cases, most urgent first"), h("table", { style: "margin-top:6px" }, h("tbody", null, d.service.open_cases.slice(0, 12).map((c) => h("tr", { class: "click", onclick: run(() => open(c.reference)) }, h("td", { class: "mono small" }, c.reference),
+              h("td", null, c.priority ? pill(c.priority, cap(c.priority)) : null), h("td", { class: "small" }, c.queue || "–"), h("td", null, dueText(c.due, c, false))))))) : null)),
+        h("div", { class: "grid g2", style: "margin-top:14px" },
+          cardOf("Why cases need a person", h("p", { class: "small muted", style: "margin-bottom:6px" }, "The checks that most often send a case to a person, counted once for each case they stopped."),
+            d.reasons.length ? d.reasons.map((x) => h("div", { class: "hbar", title: x.title + " (" + agentName(x.agent) + "): " + x.cases + " case(s)" }, h("span", { class: "nm" }, x.title, h("small", null, agentName(x.agent))), h("span", { class: "tr" }, h("i", { style: "width:" + Math.round((x.cases / top3) * 100) + "%" })), h("b", null, x.cases)))
+              : h("p", { class: "muted small" }, "No check has sent a case to a person.")),
+          cardOf("Cases assessed each day, last 14 days", h("div", { class: "cols", role: "img", "aria-label": "Cases assessed per day by outcome" }, d.daily.map((x, i) => { const tot = x.proceed + x.request_evidence + x.review;
+              return h("div", { class: "col", tabindex: tot ? 0 : null, "data-tip": dayName(x.day) + ": " + (tot ? KEYS.filter((k) => x[k]).map((k) => x[k] + " " + NAMES[k].toLowerCase()).join(", ") : "none") },
+                KEYS.filter((k) => x[k]).map((k) => h("i", { style: "height:" + (x[k] / most) * 100 + "%;background:var(" + VAR[k] + ")" })), tot && (i === peak || i === d.daily.length - 1) ? h("span", { class: "n", style: "top:auto;bottom:calc(" + (tot / most) * 100 + "% + " + (KEYS.filter((k) => x[k]).length * 2 + 1) + "px)" }, tot) : null); })),
+            h("div", { class: "colx" }, d.daily.map((x, i) => h("span", { title: x.day }, i === 0 || x.day.slice(8) === "01" ? new Date(x.day + "T12:00:00").toLocaleDateString(undefined, { day: "numeric", month: "short" }) : +x.day.slice(8)))), legend(d.daily.reduce((m, x) => { KEYS.forEach((k) => (m[k] += x[k])); return m; }, { proceed: 0, request_evidence: 0, review: 0 })),
+            h("details", { style: "margin-top:6px" }, h("summary", { class: "small muted", style: "cursor:pointer" }, "The same numbers as a table"), h("table", { style: "margin-top:6px" }, h("thead", null, h("tr", null, ["Day", ...KEYS.map((k) => NAMES[k])].map((x) => h("th", null, x)))),
+              h("tbody", null, d.daily.filter((x) => x.proceed + x.request_evidence + x.review).map((x) => h("tr", null, h("td", { class: "small" }, dayName(x.day)), KEYS.map((k) => h("td", null, x[k]))))))))),
+        h("div", { class: "grid g2", style: "margin-top:14px" },
+          cardOf("By use case", h("table", null, h("thead", null, h("tr", null, ["Use case", "Cases", "Outcomes", "Straight through"].map((x) => h("th", null, x)))), h("tbody", null, d.by_use_case.map((u) => h("tr", null, h("td", null, u.name), h("td", null, u.cases),
+            h("td", { style: "width:36%" }, h("div", { class: "stackbar", style: "height:10px", title: KEYS.map((k) => NAMES[k] + " " + u[k]).join(", ") }, KEYS.filter((k) => u[k]).map((k) => h("i", { style: "flex:" + u[k] + ";background:var(" + VAR[k] + ")" })))), h("td", { style: "font-weight:650" }, u.straight_through === null ? "–" : u.straight_through + "%")))))),
+          cardOf("Screening, integrity and privacy", h("table", null, h("tbody", null, [["Names screened against the watchlists", d.assurance.names_screened], ["Possible watchlist matches", d.assurance.watchlist_matches + (d.assurance.watchlist_matches ? " (" + d.assurance.waiting + " waiting, " + d.assurance.cleared + " cleared, " + d.assurance.confirmed + " confirmed)" : "")],
+              ["Integrity checks that need a person", d.assurance.integrity_alerts], ["Documents read", d.volume.documents + " (" + d.volume.pages + " pages, " + d.volume.values + " values lifted)"], ["Model calls", d.volume.model_calls]].map(([k, v]) => h("tr", null, h("td", null, k), h("td", { style: "text-align:right;font-weight:650" }, v))))),
+            d.assurance.personal_data.length ? [h("h3", { style: "margin:14px 0 4px" }, "Personal data found, by kind"), h("div", { class: "chips" }, d.assurance.personal_data.map((x) => h("span", { class: "chip", style: "cursor:default" }, x.kind + ": " + x.items)))] : null)))];
+  }
+
   function agents() {
     const list = (title, items, cls) => (items && items.length ? h("div", { class: "clause " + (cls || "") }, h("h4", null, title), h("ul", null, items.map((x) => h("li", null, x)))) : null);
     return [section("The agents and their contracts", "One agent per job. Each has a contract the harness enforces on every run: what it needs before it starts, what it promises when it ends, what it must never do, and what it may spend. Nothing that decides may use a model."),
@@ -670,7 +776,7 @@
   // ---------------------------------------------------------------------------------------------- how it is governed
   function platform() {
     const f = S.pf, c = f.contracts, m = f.memory, led = f.provenance.ledger, t = f.throttling, lim = t.model.limits, row = (k, v) => h("tr", null, h("td", { class: "small muted", style: "width:42%" }, k), h("td", null, v));
-    return [section("How the agents are governed", "Six things every agent runs on, and how each stands in this workspace right now."),
+    return [section("How the agents are governed", "What every agent runs on, and how each stands in this workspace right now."),
       h("div", { class: "grid g2" },
         cardOf("Agent contracts", h("p", { class: "small muted", style: "margin-bottom:8px" }, "A contract says what an agent needs, what it promises, what it may change, what it may spend and what it must never do."),
           h("table", null, h("tbody", null, row("Agents under contract", c.agents), row("Checks the contracts name", c.checks), row("Agent runs so far", c.runs), row("Runs that kept their contract", h("span", null, c.kept + " ", pill(c.kept === c.runs ? "pass" : "fail", c.kept === c.runs ? "all" : c.runs - c.kept + " broken"))))),
@@ -689,7 +795,14 @@
         cardOf("Throttling", h("p", { class: "small muted", style: "margin-bottom:8px" }, "How fast the agents may call a model and how fast a caller may call the API. At a limit a call waits; past the wait the agent falls back to patterns and says so."),
           h("table", null, h("tbody", null, row("Model calls", t.model.describe + ", wait up to " + lim.max_wait_s + "s"), row("In the last minute", t.model.last_minute.calls + " call(s), " + t.model.last_minute.tokens.toLocaleString() + " tokens"),
             row("Since start", t.model.totals.calls + " call(s) · " + t.model.totals.waits + " waited · " + t.model.totals.shed + " not made"), row("Per agent, per run", "a budget of calls and tokens in each contract"),
-            row("API", (t.api.requests_per_minute ? t.api.requests_per_minute + " requests a minute per caller" : "no limit") + " · " + t.api.totals.refused + " refused"), row("Assessments at once", t.assessments.max_at_once + " (running now: " + t.assessments.running + ")")))))];
+            row("API", (t.api.requests_per_minute ? t.api.requests_per_minute + " requests a minute per caller" : "no limit") + " · " + t.api.totals.refused + " refused"), row("Assessments at once", t.assessments.max_at_once + " (running now: " + t.assessments.running + ")")))),
+        cardOf("Watchlists", h("p", { class: "small muted", style: "margin-bottom:8px" }, "What the screening agent compares every party, vessel and port with. Each result names the list, its version and its fingerprint."),
+          (S.cfg.watchlists || []).length ? h("table", null, h("thead", null, h("tr", null, ["List", "Version", "Entries", "Source"].map((x) => h("th", null, x)))), h("tbody", null, S.cfg.watchlists.map((w) => h("tr", null, h("td", null, w.name, w.demonstration ? h("div", { class: "small", style: "color:var(--warn)" }, "invented entries, for demonstration") : null), h("td", { class: "small" }, w.version || "–"), h("td", null, w.entries), h("td", { class: "small muted" }, w.source)))))
+            : h("div", { class: "note" }, "No watchlist is loaded: screening reports that it could not be done."),
+          (S.cfg.watchlist_problems || []).length ? h("div", { class: "knote", style: "margin-top:8px" }, h("b", null, "Could not be read: "), S.cfg.watchlist_problems.join("; "), ". Every case says so as a finding until the list is fixed; a list that did not load is never read as no match.") : null,
+          h("p", { class: "small muted", style: "margin-top:8px" }, "Name your own lists with DOCUINSIGHTS_WATCHLISTS (JSON or CSV files, or folders of them). The demonstration list is then no longer used.")),
+        cardOf("Privacy and notifications", h("table", null, h("tbody", null, row("Personal data", "Found by document and by kind on every case, by fixed patterns"), row("Masked in", "The decision record on request, notifications, and the knowledge base (so its export carries no account number, email or telephone number)"),
+          row("Stored documents", "Kept as received: nothing is redacted in the original"), row("Notifications", S.cfg.webhook ? "A signed message to the address in DOCUINSIGHTS_WEBHOOK_URL when a case is assessed or decided" : "Off. Set DOCUINSIGHTS_WEBHOOK_URL to tell another system when a case is assessed or decided")))))];
   }
 
   // ---------------------------------------------------------------------------------------------- findings
@@ -731,9 +844,46 @@
   }
   async function reviewFinding(f, decision) { const v = await form((decision === "accept" ? "Accept" : "Flag") + ": " + f.title, [{ k: "reason", label: "Note for the audit trail", type: "textarea" }], decision === "accept" ? "Accept" : "Flag"); if (v) setCase(await api("cases/" + S.c.reference + "/review", { target: "finding", id: f.id, decision, reason: v.reason })); }
   function banner(rec) {
-    return h("div", { class: "banner " + rec.outcome }, h("div", { class: "small muted" }, "Recommendation for the caseworker"), h("h2", null, rec.label), h("p", null, rec.description),
+    const fresh = S.sealed !== S.c.reference + ":" + A().id; S.sealed = S.c.reference + ":" + A().id;   // the seal lands once, when a recommendation is first shown
+    return h("div", { class: "banner " + rec.outcome }, h("span", { class: "seal " + rec.outcome + (fresh ? " stamp" : ""), "aria-hidden": "true" }, { proceed: "✓", request_evidence: "?", review: "!" }[rec.outcome] || "·"),
+      h("div", { class: "small muted" }, "Recommendation for the caseworker"), h("h2", null, rec.label), h("p", null, rec.description),
       rec.reasons.length ? h("ul", null, rec.reasons.map((r) => h("li", null, r))) : null, rec.requests.length ? h("p", null, h("b", null, "To request: "), rec.requests.join("; ")) : null,
       rec.caveats.length ? h("p", { class: "small" }, h("b", null, "Caveat: "), rec.caveats.join(" ")) : null, h("p", { class: "small muted" }, "Decided by: " + rec.decided_by + "."));
+  }
+
+  function triageCard(a) {
+    const t = a.triage; if (!t) return null;
+    return h("div", { class: "card tri-card" }, h("div", null, h("dl", { style: "margin:0" }, h("dt", null, "Priority"), h("dd", null, pill(t.priority, cap(t.priority))))), h("div", null, h("dl", { style: "margin:0" }, h("dt", null, "Queue"), h("dd", null, t.queue_name))),
+      h("div", null, h("dl", { style: "margin:0" }, h("dt", null, "Due"), h("dd", null, t.due, " ", dueText(t.due, S.c.due, !!S.c.decision)))), h("div", null, h("dl", { style: "margin:0" }, h("dt", null, "With"), h("dd", null, S.c.assigned ? S.c.assigned.to : "Nobody yet", " ", h("button", { class: "btn sm", onclick: assign }, S.c.assigned ? "Change" : "Take it")))),
+      h("div", { class: "why" }, h("ul", null, t.reasons.map((r) => h("li", null, r))), t.note ? h("p", { class: "muted", style: "margin-top:6px" }, t.note) : null));
+  }
+  const recordButtons = () => h("div", { class: "row" }, h("button", { class: "btn sm", onclick: openRecord(false) }, "Open the decision record"), h("button", { class: "btn sm", onclick: openRecord(true), title: "The same record with personal data masked, for a copy that leaves the organisation" }, "With personal data masked"),
+    h("span", { class: "small muted" }, "One printable page: what was received, what was found and on which line, who decided what."));
+
+  // ---------------------------------------------------------------------------------------------- screening, integrity, privacy
+  function assurance() {
+    const a = A(), scr = a.screening, pv = a.privacy, of = (agent) => a.findings.filter((f) => f.agent === agent), rankOf = { fail: 0, missing: 1, review: 2, pass: 3, info: 4 }, sorted = (fs) => [...fs].sort((x, y) => rankOf[x.status] - rankOf[y.status]);
+    if (!scr && !pv && !of("integrity").length) return [section("Screening, integrity, privacy", "This case was assessed before these checks existed."), h("button", { class: "btn primary", onclick: run(async () => setCase(await api("cases/" + S.c.reference + "/assess", {}), "monitor")) }, "Assess it again")];
+    const dispose = (f, decision) => run(async () => { const hit = f.data.screening;
+      const v = await form((decision === "clear" ? "Clear: " : "Confirm: ") + hit.subject + " and " + hit.entry, [{ k: "reason", label: decision === "clear" ? "Why is this not the listed " + hit.kind + "? (required, kept in the audit trail)" : "Note for the audit trail", type: "textarea", min: decision === "clear" ? 5 : 0, need: "Say why this is not the listed " + hit.kind + ". The reason is kept in the audit trail." }], decision === "clear" ? "Clear the match" : "Confirm the match");
+      if (v) setCase(await api("cases/" + S.c.reference + "/review", { target: "screening", id: f.id, decision, reason: v.reason })); });
+    const hits = of("screening").filter((f) => f.data && f.data.screening && f.data.screening.entry), lists = scr ? scr.lists || [] : [];
+    return [section("Screening, integrity, privacy", "Three checks beside the use case's own rules: is any party on a watchlist, does each document hold together on its own, and what personal data does the package carry. All three are code; none is a model's opinion."),
+      h("div", { class: "stack" },
+        cardOf("Watchlist screening", scr && scr.enabled !== false ? [h("p", { class: "small muted", style: "margin-bottom:8px" }, (scr.screened || []).length + " name(s) screened against " + lists.reduce((n, l) => n + l.entries, 0) + " entries. A match is the same name, a name that holds every word of the listed one, or a spelling at least " + Math.round((scr.threshold || 0) * 100) + "% alike. A match is never cleared by the system."),
+          lists.map((l) => h("div", { class: "note", style: "margin-bottom:8px" }, h("b", null, l.name + (l.version ? " " + l.version : "")), " · " + l.entries + " entries" + (l.published ? " · published " + l.published : "") + " · fingerprint " + l.sha256, l.demonstration ? h("div", { style: "color:var(--warn);margin-top:2px" }, "Invented entries, shipped for demonstration. Name your own lists with DOCUINSIGHTS_WATCHLISTS and this one is no longer used.") : null)),
+          !lists.length ? h("div", { class: "note" }, "No watchlist is loaded, so nothing could be screened. That is reported as a finding, never as clear.") : null,
+          (scr.problems || []).length ? h("div", { class: "knote", style: "margin-bottom:8px" }, h("b", null, "Not every list could be read, so this screening is incomplete: "), scr.problems.join("; ")) : null,
+          hits.length ? hits.map((f) => { const x = f.data.screening; return h("div", { class: "hitrow" }, h("div", null, h("div", { class: "vs" }, pill(f.status, { review: "waiting for a person", fail: "confirmed", info: "cleared" }[f.status] || f.status), h("b", null, x.subject), h("span", null, "in this case"), "↔", h("b", null, x.entry), h("span", null, "listed · " + x.how + " (" + Math.round(x.score * 100) + "%)")),
+              h("p", { class: "small", style: "margin-top:4px" }, f.message), f.sources.length ? h("div", { class: "chips", style: "margin-top:6px" }, f.sources.slice(0, 4).map((src) => h("span", { class: "chip", onclick: () => openSource(src) }, src.doc_name + (src.page ? " p" + src.page + (src.line ? " l" + src.line : "") : "")))) : null, knowledgeLine(f)),
+              f.status === "review" ? h("div", { class: "row", style: "flex-wrap:nowrap" }, h("button", { class: "btn sm", onclick: dispose(f, "clear") }, "Not the same: clear"), h("button", { class: "btn sm primary", onclick: dispose(f, "confirm") }, "Confirm the match")) : h("span", { class: "small muted" }, "decided")); })
+            : of("screening").map((f) => h("div", { class: "row", style: "align-items:flex-start;margin-top:6px" }, pill(f.status), h("div", { style: "flex:1" }, h("b", null, f.title), h("div", { class: "small" }, f.message), knowledgeLine(f)))),
+          (scr.screened || []).length ? h("details", { style: "margin-top:10px" }, h("summary", { class: "small muted", style: "cursor:pointer" }, "The " + scr.screened.length + " name(s) screened"), h("table", { style: "margin-top:6px" }, h("tbody", null, scr.screened.map((x) => h("tr", null, h("td", null, x.name), h("td", { class: "small muted" }, x.what), h("td", { class: "small muted" }, x.kind)))))) : null]
+          : h("p", { class: "muted" }, "Screening is switched off for this use case.")),
+        h("div", null, h("h3", { style: "margin:6px 0 10px;font-size:15px" }, "Document integrity (" + of("integrity").length + " checks)"), h("div", { class: "stack" }, sorted(of("integrity")).map((f) => findingCard(f, { review: true })), !of("integrity").length ? h("p", { class: "muted" }, "No integrity check ran on this case.") : null)),
+        cardOf("Personal data", pv ? [pv.categories.length ? h("table", null, h("thead", null, h("tr", null, ["Kind", "Items", "In"].map((x) => h("th", null, x)))), h("tbody", null, pv.categories.map((c) => h("tr", null, h("td", null, c.name), h("td", null, c.count),
+            h("td", { class: "small" }, c.documents.map((id) => (S.c.documents.find((d) => d.id === id) || {}).name || id).join(", ")))))) : h("p", { class: "muted" }, "None found by the patterns. A pattern finds what is written in a recognisable form; it does not find a person described in free text."),
+          h("p", { class: "small muted", style: "margin-top:8px" }, pv.masking), of("privacy").filter((f) => f.status !== "info").map((f) => h("div", { style: "margin-top:10px" }, findingCard(f, { review: true }))), h("div", { style: "margin-top:10px" }, recordButtons())] : h("p", { class: "muted" }, "Not checked.")))];
   }
 
   // ---------------------------------------------------------------------------------------------- case views
@@ -744,9 +894,9 @@
   }
   function summary() {
     const a = A(), c = (s) => a.findings.filter((f) => f.status === s).length, g = a.metrics.graph;
-    return [section("Case intelligence summary", "What the package contains, what it supports and what stands in the way, composed from the findings."), h("div", { class: "stack" }, banner(a.recommendation),
+    return [section("Case intelligence summary", "What the package contains, what it supports and what stands in the way, composed from the findings."), h("div", { class: "stack" }, banner(a.recommendation), triageCard(a),
       h("div", { class: "grid g4" }, [[S.c.documents.filter((d) => !d.removed).length, "documents, " + a.metrics.pages + " pages"], [c("pass"), "checks passed"], [c("fail") + c("missing") + c("review"), "need attention"], [g.nodes + " / " + g.edges, "graph nodes / edges"]].map(([v, l]) => h("div", { class: "tile" }, h("b", null, v), h("span", null, l)))),
-      cardOf("Summary", h("p", null, a.summary), h("p", { class: "small muted", style: "margin-top:8px" }, "Assessment " + a.id + " · " + when(a.at) + " · trigger: " + a.trigger + " · profile v" + a.profile_version + " · vocabulary v" + a.overlay_version + " · " + a.metrics.duration_ms + " ms" + (a.contracts ? " · " + a.contracts.kept + " of " + a.contracts.runs + " agent contracts kept" : ""))),
+      cardOf("Summary", h("p", null, a.summary), h("p", { class: "small muted", style: "margin:8px 0 10px" }, "Assessment " + a.id + ", " + when(a.at) + ", trigger: " + a.trigger + ", profile v" + a.profile_version + ", vocabulary v" + a.overlay_version + ", " + a.metrics.duration_ms + " ms" + (a.contracts ? ", " + a.contracts.kept + " of " + a.contracts.runs + " agent contracts kept" : "")), recordButtons()),
       known(a), graphCard(),
       cardOf("Case facts", kv(prof().case.fields.map((f) => [f.name, S.c.fields[f.id]]))),
       cardOf("Parties and goods", h("table", null, h("thead", null, h("tr", null, ["Entity", "Kind", "Roles", "Mentioned in"].map((x) => h("th", null, x)))), h("tbody", null, a.entities.map((e) => h("tr", null, h("td", null, e.name), h("td", null, e.type), h("td", { class: "small" }, (e.roles || []).join(", ")),
@@ -833,8 +983,8 @@
   // ---------------------------------------------------------------------------------------------- the orchestration board
   // One picture of an assessment: the process on top, the boss agent's plan under it, the agents the harness ran, and the two things they
   // all share (the knowledge graph and the shared memory). Every lane uses the same nine columns, so a step reads straight down.
-  const OSTEPS = [["Case intake", ["intake"]], ["Document understanding", ["classify", "extract"]], ["Graph construction", ["resolve", "graph"]], ["Evidence validation", ["evidence"]],
-    ["Reference and policy", ["reference", "policy"]], ["Checks and verification", ["consistency", "verify"]], ["Caseworker review", null], ["Decision and learning", null]];
+  const OSTEPS = [["Case intake", ["intake"]], ["Document understanding", ["classify", "extract", "privacy"]], ["Parties and graph", ["resolve", "screening", "graph"]], ["Evidence validation", ["evidence"]],
+    ["Reference and policy", ["reference", "policy"]], ["Checks, verdict, triage", ["consistency", "integrity", "verify", "triage"]], ["Caseworker review", null], ["Decision and learning", null]];
   const OX = (i) => 140 + 107.5 * (i + 0.5);   // the middle of step i, in a drawing 1000 wide whose first 140 are the lane names
   const TRIGGER = { correction: "a person corrected it", amendment: "an amendment arrived", assessment: "asked again", regression: "regression run" };
   const short = (name) => String(name || "").replace(/ Agent$/, "");
@@ -1013,13 +1163,16 @@
     const draft = (kind) => run(async () => { S.draft = await api("cases/" + S.c.reference + "/correspondence", { kind }); render(); });
     const decide = (d, label) => h("button", { class: "btn" + (d === "approve" ? " primary" : ""), onclick: run(async () => { const v = await form(label, [{ k: "note", label: "Note (required when it differs from the recommendation)", type: "textarea" }], label); if (v) setCase(await api("cases/" + S.c.reference + "/decision", { decision: d, note: v.note })); }) }, label);
     return [section("Decision workspace", "The caseworker decides. The recommendation and every finding are here to inspect, correct and overrule; a decision that differs from the recommendation needs a note."),
-      h("div", { class: "stack" }, banner(a.recommendation),
+      h("div", { class: "stack" }, banner(a.recommendation), triageCard(a),
         S.c.decision ? cardOf("Decision recorded", kv([["Decision", S.c.status], ["By", S.c.decision.by], ["When", when(S.c.decision.at)], ["On assessment", S.c.decision.assessment], ["Differs from recommendation", S.c.decision.override ? "yes" : "no"], ["Note", S.c.decision.note]])) : null,
+        !S.c.decision && (S.c.earlier_decisions || []).length ? cardOf("Decide again", h("p", { class: "small" }, "A decision was recorded, and then the case was assessed again. A decision belongs to the assessment it was taken on, so this one waits for a new decision."),
+          h("table", { style: "margin-top:8px" }, h("thead", null, h("tr", null, ["Earlier decision", "By", "When", "On assessment", "Note"].map((x) => h("th", null, x)))), h("tbody", null, S.c.earlier_decisions.slice().reverse().map((g) => h("tr", null, h("td", null, g.decision), h("td", { class: "small" }, g.by), h("td", { class: "small muted" }, when(g.at)), h("td", { class: "small mono" }, g.assessment), h("td", { class: "small" }, g.note || "–")))))) : null,
         (a.unresolved || []).length ? cardOf("Possible entity matches to settle", a.unresolved.map((m) => h("div", { class: "row", style: "margin-bottom:6px" }, m.reason, matchButtons(m)))) : null,
         h("div", null, h("h3", { style: "margin:4px 0 10px;font-size:15px" }, "Findings that need a person (" + need.length + ")"), h("div", { class: "stack" }, need.map((f) => findingCard(f, { review: true })), !need.length ? h("p", { class: "muted" }, "None.") : null)),
         cardOf("Correspondence", h("div", { class: "row", style: "margin-bottom:10px" }, h("button", { class: "btn sm", onclick: draft("evidence_request") }, "Draft an evidence request"), h("button", { class: "btn sm", onclick: draft("decision_note") }, "Draft a decision note")),
           S.draft ? (S.draft.body ? [h("label", { class: "f" }, h("span", null, "Subject"), h("input", { type: "text", value: S.draft.subject })), h("label", { class: "f", style: "margin-top:8px" }, h("span", null, "Draft (" + S.draft.method + "). " + S.draft.note), h("textarea", { style: "min-height:190px", value: S.draft.body }))] : h("p", { class: "muted" }, S.draft.note)) : h("p", { class: "muted small" }, "A draft is written from the findings for you to edit. Nothing is sent from here.")),
         cardOf("Decide", h("div", { class: "row" }, decide("approve", "Approve"), decide("request_evidence", "Request evidence"), decide("escalate", "Escalate for review"), decide("reject", "Reject"))),
+        cardOf("Decision record", recordButtons()),
         cardOf("Content repository", h("p", { class: "small muted", style: "margin-bottom:8px" }, S.cfg.repository.name + ": " + S.cfg.repository.detail + (S.cfg.repository.note ? " " + S.cfg.repository.note : "")),
           S.c.filed ? kv([["Filed", when(S.c.filed.filed_at)], ["Documents", S.c.filed.documents.map((d) => d.name + " → " + d.repository_id).join("; ")]]) : null,
           h("button", { class: "btn sm", style: "margin-top:8px", onclick: run(async () => { await api("cases/" + S.c.reference + "/file", {}); toast("Filed to the repository"); open(S.c.reference, "decision"); }) }, S.c.filed ? "File again" : "File the case and its assessment")))];

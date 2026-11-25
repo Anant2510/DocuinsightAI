@@ -1,6 +1,7 @@
 """The case orchestrator: the stages of an assessment, the agent that owns each one, and the record of every run.
 
-    intake -> classify -> extract -> resolve -> graph -> evidence -> reference -> policy -> consistency -> verify
+    intake -> classify -> extract -> privacy -> resolve -> screening -> graph -> evidence -> reference -> policy
+           -> consistency -> integrity -> verify -> triage
 
 `assess()` runs them in order. `step()` runs one (and whatever it still depends on), which is how a host that
 orchestrates the agents itself (the CX Nova layer: one flow step per agent) drives the same code. Every stage leaves an
@@ -10,27 +11,32 @@ it read from and wrote to the graph.
 from __future__ import annotations
 
 import time
+from datetime import date
 from typing import Any, Callable
 
-from . import checks, contracts as C, graphs, harness as H, reader, understand
+from . import assurance, checks, contracts as C, graphs, harness as H, reader, understand
 from .casefile import current, event, finding, live_docs, now
 from .model import PROMPT_VERSION, OfflineModel
 from .profiles import Profile
 
-STAGES = ["intake", "classify", "extract", "resolve", "graph", "evidence", "reference", "policy", "consistency", "verify"]
+STAGES = ["intake", "classify", "extract", "privacy", "resolve", "screening", "graph", "evidence", "reference", "policy", "consistency", "integrity", "verify", "triage"]
 
 AGENTS: list[dict[str, Any]] = [
     {"id": "orchestrator", "name": "Case Orchestrator", "stage": "", "kind": "code", "responsibility": "Plans the assessment, runs the stages in dependency order, retries and holds the human checkpoints.", "output": "Execution plan and state"},
     {"id": "intake", "name": "Intake Agent", "stage": "intake", "kind": "code + model (scans)", "responsibility": "Registers the case, checks each file, keeps immutable document versions with their hashes and reads them into text.", "output": "Case and evidence package"},
     {"id": "classify", "name": "Classification Agent", "stage": "classify", "kind": "model, verified", "responsibility": "Names each document against the profile's document types, with a confidence, and sets it beside the uploader's category.", "output": "Document type and confidence"},
     {"id": "extract", "name": "Extraction Agent", "stage": "extract", "kind": "model, verified", "responsibility": "Lifts the declared fields with a source anchor (page, line, the line as printed) and checks each value against the text.", "output": "Evidence assertions"},
+    {"id": "privacy", "name": "Privacy Agent", "stage": "privacy", "kind": "code", "responsibility": "Finds the personal data in the package, by document and by kind, so that it is masked in whatever leaves the system.", "output": "Personal data report and masks"},
     {"id": "resolve", "name": "Entity Resolution Agent", "stage": "resolve", "kind": "code", "responsibility": "Links repeated parties, references and goods across documents; leaves near-matches for a person.", "output": "Canonical entities and links"},
+    {"id": "screening", "name": "Screening Agent", "stage": "screening", "kind": "code + watchlists", "responsibility": "Compares every party, vessel and place with the watchlists and leaves each possible match to a person.", "output": "Possible matches"},
     {"id": "graph", "name": "Knowledge Graph Agent", "stage": "graph", "kind": "code", "responsibility": "Writes the case subgraph: documents, versions, assertions, entities and the provenance edges between them.", "output": "Graph update"},
     {"id": "evidence", "name": "Evidence Completeness Agent", "stage": "evidence", "kind": "code", "responsibility": "Checks mandatory, conditional and alternative evidence and explains how an absence was established.", "output": "Missing and uncertain evidence"},
     {"id": "reference", "name": "Reference Agent", "stage": "reference", "kind": "code + connector", "responsibility": "Retrieves date-relevant reference content with its provenance and reasons over it from stated product characteristics.", "output": "Candidate classifications"},
     {"id": "policy", "name": "Policy Agent", "stage": "policy", "kind": "code", "responsibility": "Executes the approved deterministic rules: timing, value reconciliation, code consistency.", "output": "Rule evaluations"},
     {"id": "contradiction", "name": "Contradiction Agent", "stage": "consistency", "kind": "code", "responsibility": "Compares parties, quantities, weights, references and descriptions across documents.", "output": "Corroborations and discrepancies"},
+    {"id": "integrity", "name": "Integrity Agent", "stage": "integrity", "kind": "code + memory", "responsibility": "Checks that each document holds together on its own: sums, dates, check digits, the same file twice, details that changed since last time.", "output": "Integrity checks"},
     {"id": "verification", "name": "Verification Agent", "stage": "verify", "kind": "code", "responsibility": "Checks source coverage per finding, blocks unsupported conclusions and aggregates the recommendation.", "output": "Verified findings and recommendation"},
+    {"id": "triage", "name": "Triage Agent", "stage": "triage", "kind": "code", "responsibility": "Says how urgent the case is, which queue picks it up and when it is due against the service target.", "output": "Priority, queue and due date"},
     {"id": "counterfactual", "name": "Counterfactual Agent", "stage": "", "kind": "code", "responsibility": "Changes a fact on a copy of the case, reruns the dependent checks and explains what moved.", "output": "Impact explanation"},
     {"id": "correspondence", "name": "Correspondence Agent", "stage": "", "kind": "template or model, verified", "responsibility": "Drafts an evidence request or a decision note from the findings, for a person to edit.", "output": "Editable draft"},
     {"id": "feedback", "name": "Feedback Agent", "stage": "", "kind": "code", "responsibility": "Turns validated corrections into governed improvement proposals with a regression check.", "output": "Improvement proposal"},
@@ -48,7 +54,8 @@ class Tools:
     def __init__(self, *, model: Any = None, read_bytes: Callable[[dict[str, Any], dict[str, Any]], bytes] | None = None, overlay: dict[str, Any] | None = None,
                  fetch: Any = None, progress: Callable[[dict[str, Any]], None] | None = None, sidecar: Callable[[dict[str, Any], dict[str, Any]], str | None] | None = None,
                  limiter: Any = None, ledger: Any = None, episodes: Any = None, on_finish: Callable[[dict[str, Any]], None] | None = None,
-                 ground: Callable[..., dict[str, Any] | None] | None = None) -> None:
+                 ground: Callable[..., dict[str, Any] | None] | None = None, today: Callable[[], date] | None = None,
+                 watchlists: Callable[[], list[dict[str, Any]]] | None = None) -> None:
         self.model = model or OfflineModel()
         self.read_bytes = read_bytes
         self.overlay = overlay or {}
@@ -60,6 +67,8 @@ class Tools:
         self.episodes = episodes
         self.on_finish = on_finish
         self.ground = ground      # the host's knowledge graph: the nodes an agent's contract says it is handed before it starts
+        self.today = today or date.today          # the day triage and the date checks count from (a test sets its own)
+        self.watchlists = watchlists              # the lists the screening agent reads; none given: the installation's, else the demonstration list
         self.memory: Any = None   # the memory handle of the agent that is running; set by the harness
         self.grounding: Any = None   # what the harness handed the agent that is running
 
@@ -67,7 +76,7 @@ class Tools:
 def begin(case: dict[str, Any], *, trigger: str = "assessment", by: str = "system") -> dict[str, Any]:
     n = len(case.get("history") or []) + (1 if case.get("assessment") else 0) + 1
     case["working"] = {"id": f"A{n}", "at": now(), "trigger": trigger, "by": by, "done": [], "stages": {}, "runs": [], "findings": [], "entities": [], "unresolved": [],
-                       "graph": {"nodes": [], "edges": []}, "references": [], "memory": [], "recall": None}
+                       "graph": {"nodes": [], "edges": []}, "references": [], "memory": [], "recall": None, "privacy": None, "screening": None, "triage": None}
     case["progress"] = {"state": "running", "stage": "", "done": []}
     return case["working"]
 
@@ -109,6 +118,19 @@ def _run_stage(stage: str, case: dict[str, Any], profile: Profile, tools: Tools,
         met = len((recall or {}).get("parties") or []) + len((recall or {}).get("identifiers") or [])
         return {"entities": len(out["entities"]), "unresolved": len(out["unresolved"]), "known": met,
                 "summary": out["summary"] + (f"; {met} already known to the workspace" if met else "")}
+    if stage in ("privacy", "screening", "triage"):   # these three leave the case graph alone
+        if stage == "privacy":
+            out = assurance.privacy(case, profile)
+            w["privacy"] = out.pop("privacy")
+        elif stage == "screening":
+            out = assurance.screening(case, profile, w["entities"], tools.watchlists() if tools.watchlists else None)
+            w["screening"] = out.pop("screening")
+        else:
+            w["triage"] = assurance.triage(case, profile, w["findings"], w["recommendation"], today=tools.today())
+            t = w["triage"]
+            return {"triage": t, "summary": f"Priority {t['priority']}, queue '{t['queue_name']}', due {t['due']} ({t['target_days']} {'working ' if t['clock'] == 'working' else ''}day target)"}
+        _keep(stage, w, out, tools)
+        return out
     g = graphs.reopen(w["graph"])
     before = (len(g["nodes"]), len(g["edges"]))
     if stage == "graph":
@@ -123,24 +145,32 @@ def _run_stage(stage: str, case: dict[str, Any], profile: Profile, tools: Tools,
         out = checks.policy(case, profile, w["references"])
     elif stage == "consistency":
         out = checks.consistency(case, profile, tools.overlay)
+    elif stage == "integrity":
+        earlier = (lambda key, kind: tools.memory.earlier(case, key, kind)) if tools.memory is not None and (profile.integrity.get("stable")) else None
+        out = assurance.integrity(case, profile, w["entities"], today=tools.today(), earlier=earlier, read_bytes=tools.read_bytes)
     elif stage == "verify":
         out = checks.verify(case, profile, w["findings"], g)
         w["recommendation"] = out["recommendation"]
     else:
         raise ValueError(f"unknown stage '{stage}'")
     if stage != "verify":
-        found = out.pop("findings", [])
-        rests = (tools.grounding or {}).get("basis") or {}   # what the knowledge graph says each rule rests on, as the harness handed it to this agent
-        for f in found:
-            got = rests.get((f.get("rule") or {}).get("title") or "")
-            if got:
-                f["basis"] = got
-        if rests:
-            out["basis"] = sum(1 for f in found if f.get("basis"))
-        w["findings"] = [f for f in w["findings"] if f["agent"] != _agent_key(stage)] + found
+        _keep(stage, w, out, tools)
     w["graph"] = graphs.finish(g)
     out["graph_writes"] = {"nodes": len(g["nodes"]) - before[0], "edges": len(g["edges"]) - before[1]}
     return out
+
+
+def _keep(stage: str, w: dict[str, Any], out: dict[str, Any], tools: Tools) -> None:
+    """Put a stage's findings on the case in place of the ones its agent left last time, each with what the knowledge graph says its rule rests on."""
+    found = out.pop("findings", [])
+    rests = (tools.grounding or {}).get("basis") or {}   # as the harness handed it to this agent
+    for f in found:
+        got = rests.get((f.get("rule") or {}).get("title") or "")
+        if got:
+            f["basis"] = got
+    if rests:
+        out["basis"] = sum(1 for f in found if f.get("basis"))
+    w["findings"] = [f for f in w["findings"] if f["agent"] != _agent_key(stage)] + found
 
 
 def _agent_key(stage: str) -> str:
@@ -156,8 +186,16 @@ def plan(stage: str, case: dict[str, Any], profile: Profile, w: dict[str, Any]) 
         return [f"Name the kind of {d['name']}" for d in docs]
     if stage == "extract":
         return [f"Lift the facts of {d['name']}" for d in docs]
+    if stage == "privacy":
+        return [f"Search {d['name']} for personal data" for d in docs]
     if stage == "resolve":
         return ["Link the parties, goods and reference numbers the documents repeat", "Recall what the workspace already knows about them"]
+    if stage == "screening":
+        return ["Screen every party against the watchlists"] + [f"Screen: {profile.field_name(x['field'])}" for x in profile.screening.get("fields") or []]
+    if stage == "integrity":
+        return [f"Check: {r['title']}" for r in assurance.declared_rules(profile) if r["family"] == "integrity"]
+    if stage == "triage":
+        return ["Set the priority", "Name the queue", "Work out the due date against the service target"]
     if stage == "graph":
         return ["Write the case as a graph"]
     if stage == "evidence":
@@ -225,7 +263,7 @@ def step(case: dict[str, Any], profile: Profile, tools: Tools, stage: str) -> di
     if not trace["contract"]["kept"]:
         _escalate(case, profile, w, agent, trace["contract"]["broken"])
     H.record(tools, case, agent, run["id"], run["summary"], trace, run["status"])
-    if stage == "verify":
+    if stage == STAGES[-1]:
         _finish(case, profile, tools, w)
     return out
 
@@ -248,6 +286,7 @@ def _finish(case: dict[str, Any], profile: Profile, tools: Tools, w: dict[str, A
     if prev:
         case.setdefault("history", []).append(brief(prev))
     assessment = {k: w[k] for k in ("id", "at", "trigger", "by", "stages", "runs", "findings", "entities", "unresolved", "graph", "references", "recommendation")}
+    assessment.update({k: w.get(k) for k in ("privacy", "screening", "triage")})
     assessment["memory"] = {"working": w.get("memory") or [], "recall": w.get("recall")}
     assessment["contracts"] = {"version": C.get("orchestrator")["version"], "kept": sum(1 for r in w["runs"] if (r.get("contract") or {}).get("kept", True)), "runs": len(w["runs"]),
                                "broken": [{"agent": r["agent"], "why": r["contract"]["broken"]} for r in w["runs"] if not (r.get("contract") or {}).get("kept", True)]}
@@ -262,6 +301,12 @@ def _finish(case: dict[str, Any], profile: Profile, tools: Tools, w: dict[str, A
                              "graph": graphs.stats(w["graph"])}
     case["assessment"] = assessment
     case.pop("working", None)
+    if case.get("decision"):   # a decision belongs to the assessment it was taken on: what changed since has to be decided again
+        gone = case["decision"]
+        case.setdefault("earlier_decisions", []).append(gone)
+        case["decision"] = None
+        event(case, "decision.superseded", f"The decision of {gone.get('at')} ({gone.get('decision')}, by {gone.get('by')}) was taken on assessment {gone.get('assessment')}. The case was assessed again, so it waits for a new decision.",
+              by="orchestrator", data={"assessment": assessment["id"], "earlier": gone.get("assessment")})
     case["status"] = "awaiting review"
     case["progress"] = {"state": "done", "stage": "", "done": list(STAGES)}
     rec = assessment["recommendation"]

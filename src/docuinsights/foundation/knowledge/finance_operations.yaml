@@ -141,8 +141,13 @@ risks:
     says: A fraudster poses as a supplier and has the bank details changed, so a genuine payment goes to the wrong account.
     signs: [Bank details on the invoice differ from the supplier record, An urgent request to change payment details]
     affects: [Supplier master data management, Payment run]
-    caught_by: [Supplier bank detail verification]
-    checked: "no: supplier bank records are not read here"
+    caught_by: ["rule:supplier_invoice/integrity.bank_details", "rule:supplier_invoice/integrity.bank_account_check", Supplier bank detail verification]
+    checked: "in part: an account that differs from the one the supplier used in earlier cases is sent to a person; the supplier master record is not read here"
+  - name: Altered or miscalculated invoice
+    says: The total on an invoice is not what its own quantity and price give, by mistake or because a figure was changed.
+    signs: [Quantity times unit price differs from the invoice total, A total that sits just inside the matching tolerance]
+    affects: [Invoice processing]
+    caught_by: ["rule:supplier_invoice/integrity.invoice_arithmetic", "rule:supplier_invoice/integrity.order_arithmetic"]
 
 kpis:
   - {name: Cost per invoice, says: "The total cost of accounts payable divided by the number of invoices processed.", unit: currency, better: lower}
@@ -175,3 +180,7 @@ basis:
     evidence.order: [Three-way match, Purchase order before purchase]
     evidence.invoice: [Three-way match]
     evidence.receipt: [Three-way match]
+    integrity.order_arithmetic: [Recalculation of stated totals]
+    integrity.invoice_arithmetic: [Recalculation of stated totals, EU VAT Directive article 226]
+    integrity.bank_account_check: [Check-digit validation, ISO 13616]
+    integrity.bank_details: [Supplier bank detail verification, Verification of changed details]

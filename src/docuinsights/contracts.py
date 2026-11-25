@@ -202,6 +202,65 @@ def a_person_decides(case, profile, ctx):
     return rec.get("requires_human") is True and "no model" in str(rec.get("decided_by")), "the recommendation waits for a person and no model took part in it"
 
 
+# ---- the assurance agents
+@check
+def recommendation_exists(case, profile, ctx):
+    ok = bool(_w(case).get("recommendation"))
+    return ok, "the recommendation has been aggregated" if ok else "there is no recommendation to triage yet"
+
+
+@check
+def personal_data_is_reported(case, profile, ctx):
+    got = _w(case).get("privacy")
+    ok = isinstance(got, dict) and isinstance(got.get("categories"), list) and isinstance(got.get("documents"), list)
+    return ok, f"{len(got['categories'])} kind(s) of personal data reported, by document" if ok else "no report of the personal data in the package"
+
+
+@check
+def personal_values_are_masked(case, profile, ctx):
+    from . import assurance
+
+    bad = [f["id"] for f in _own(case, ctx) for text in [f.get("message") or "", *(f.get("reasoning") or []), *[str(s.get("value") or "") + " " + str(s.get("snippet") or "") for s in f.get("sources") or []]]
+           if assurance.personal_data(text)]
+    return not bad, "no finding repeats a personal value in the clear" if not bad else f"a personal value is shown unmasked in: {', '.join(dict.fromkeys(bad))}"
+
+
+@check
+def every_party_is_screened(case, profile, ctx):
+    w = _w(case)
+    scr = w.get("screening") or {}
+    if not scr.get("enabled", True):
+        return True, "screening is switched off for this use case"
+    roles = set((profile.screening or {}).get("roles") or [])
+    want = [e["name"] for e in w.get("entities") or [] if e["type"] == "Party" and (not roles or roles & set(e.get("roles") or []))]
+    got = {s["name"] for s in scr.get("screened") or []}
+    bad = [n for n in want if n not in got]
+    return not bad, f"{len(want)} part(ies) screened against {sum(x.get('entries', 0) for x in scr.get('lists') or [])} entries" if not bad else f"not screened: {', '.join(bad[:4])}"
+
+
+@check
+def matches_wait_for_a_person(case, profile, ctx):
+    bad = [f["id"] for f in _own(case, ctx) if (f.get("data") or {}).get("screening", {}).get("entry") and not (f.get("data") or {})["screening"].get("decision") and not (f["status"] == "review" and f.get("requires_human"))]
+    return not bad, "every possible match waits for a person; none was cleared by the system" if not bad else f"a match was settled without a person: {', '.join(bad)}"
+
+
+@check
+def declared_checks_are_answered(case, profile, ctx):
+    cfg = profile.integrity
+    types = {doc_type(d) for d in _docs(case)}
+    want = [f"INT-{s['id']}" for s in cfg.get("sums") or [] if str(s.get("equals", "")).partition(".")[0] in types]
+    got = {f["id"] for f in _own(case, ctx)}
+    bad = [x for x in want if x not in got]
+    return not bad, f"{len(want)} declared calculation(s), each with a finding" if not bad else f"no finding for: {', '.join(bad)}"
+
+
+@check
+def triage_is_complete(case, profile, ctx):
+    t = _w(case).get("triage") or {}
+    ok = t.get("priority") in ("urgent", "high", "normal", "low") and bool(t.get("queue")) and len(str(t.get("due") or "")) == 10 and bool(t.get("reasons"))
+    return ok, f"priority {t.get('priority')}, queue '{t.get('queue_name')}', due {t.get('due')}, with its reasons" if ok else "the triage lacks a priority, a queue, a due date or its reasons"
+
+
 # ---- promises of the on-demand agents (ctx carries what the call produced)
 @check
 def original_is_unchanged(case, profile, ctx):

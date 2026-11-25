@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__, ontology as O
+from .assurance import mask
 from .casefile import current, doc_type, live_docs, now
 from .profiles import Profile
 
@@ -49,7 +50,7 @@ SCHEMA = "1.0"
 MAX_IMPORT = 60_000
 DOMAIN = "Document and case intelligence"   # the experience domain every use case of this accelerator belongs to
 ACCELERATOR = "DocuInsights"
-BUILD = 5   # the shape a build writes. 3: KB Forge's four levels in its own level ids, the company at the head of the cases. 4: the curated knowledge bases. 5: a plain added graph gets the depth of its kinds.
+BUILD = 6   # the shape a build writes. 3: KB Forge's four levels in its own level ids, the company at the head of the cases. 4: the curated knowledge bases. 5: a plain added graph gets the depth of its kinds.
 KNOWLEDGE_DIR = Path(__file__).resolve().parent / "foundation" / "knowledge"   # the industry and domain knowledge bases that ship with the accelerator
 LEVEL_ORDER = ("industry", "domain", "solution", "customer")
 ORIGIN_WORDS = {"document": "read in a document", "system": "from the case record", "settings": "declared by a use case", "web": "from a retrieved reference",
@@ -200,6 +201,10 @@ def profile_contribution(profile: Profile) -> dict[str, Any]:
             params = [f"{k}={r[k]}" for k in ("max_days", "min_days", "tolerance_pct", "tolerance") if r.get(k) is not None]
             rule(r.get("title") or r["id"], r.get("type") or f"consistency ({r.get('kind', 'text')})", r.get("family") or label, r.get("version") or profile.version, r.get("note") or "",
                  params, {ref.partition(".")[0] for ref in _refs_of(r)}, f"{label}.{r['id']}")
+    from . import assurance
+
+    for r in assurance.declared_rules(profile):   # what the integrity and screening agents check for this use case, as rules like the others
+        rule(r["title"], r["kind"], r["family"], r["version"], r["note"], r["params"], r["types"], r["key"])
     for ref in profile.references:
         c.triple(uc, "usesReferenceSource", c.entity("ReferenceSource", ref.get("name") or ref["id"], description=ref.get("description") or f"Reference read for the date of the {profile.brand.get('case_noun', 'case')}.",
                                                      props={"connector": ref.get("connector")}, support=said(f"reference_sources.{ref['id']}", ref.get("name") or ref["id"])),
@@ -243,7 +248,7 @@ def load_packs(extra: str | Path | None = None, problems: list[str] | None = Non
 def pack_contributions(packs: list[dict[str, Any]], profiles: list[Profile]) -> tuple[list[dict[str, Any]], list[str]]:
     """Each knowledge base as a contribution to the graph, and what in it could not be resolved (a name it links to that nothing defines).
     Everything a knowledge base states sits at its level and cites the knowledge base, with the reference of the standard where there is one."""
-    from . import pipeline as P
+    from . import assurance, pipeline as P
 
     problems: list[str] = []
     rule_of: dict[str, str] = {}   # "<profile>/<group>.<id>" -> the rule's title, which names its node
@@ -257,6 +262,9 @@ def pack_contributions(packs: list[dict[str, Any]], profiles: list[Profile]) -> 
             for r in group:
                 rule_of[f"{prof.id}/{label}.{r['id']}"] = r.get("title") or r["id"]
                 family_of[label].append(rule_of[f"{prof.id}/{label}.{r['id']}"])
+        for r in assurance.declared_rules(prof):
+            rule_of[f"{prof.id}/{r['key']}"] = r["title"]
+            family_of[r["family"]].append(r["title"])
     agent_of = {a["id"]: a["name"] for a in P.AGENTS}
     built: list[tuple[dict[str, Any], Contribution, Any]] = []
     names: dict[str, tuple[str, str]] = {}   # a name any knowledge base defines -> (node, class)
@@ -389,6 +397,9 @@ def pack_contributions(packs: list[dict[str, Any]], profiles: list[Profile]) -> 
                         problems.append(f"{pack['id']}: basis names the rule '{pid}/{key}', which the use case does not have")
                     continue
                 link(c.entity("PolicyRule", title, stub=True), "ruleBasedOn", refs, f"basis.{pid}.{key}")
+        for key, refs in (pack.get("basis_by_rule") or {}).items():   # a check every use case runs under the same key (integrity.dates, screening.parties)
+            for title in dict.fromkeys(rule_of[f"{pid}/{key}"] for pid in use_case if f"{pid}/{key}" in rule_of):
+                link(c.entity("PolicyRule", title, stub=True), "ruleBasedOn", refs, f"basis.{key}")
         for family, refs in (pack.get("basis_by_family") or {}).items():
             for title in dict.fromkeys(family_of.get(family) or []):
                 link(c.entity("PolicyRule", title, stub=True), "ruleBasedOn", refs, f"basis.{family}")
@@ -441,6 +452,17 @@ def manual_contribution(fact: dict[str, Any]) -> dict[str, Any]:
     return c.data()
 
 
+def identifier_node(kind: str, value: Any) -> tuple[str, str]:
+    """(id, name) of a reference number in the graph. One that is personal data (a bank account) is named masked, with a short fingerprint
+    of the full value in its name, so that two cases quoting the same account still meet at one node and two different accounts never do.
+    The id is made from the name, as KB Forge makes it, so an import there keeps the node under the same id."""
+    shown = mask(value)
+    name = f"{kind} {value}"
+    if shown != str(value):
+        name = f"{kind} {shown} (ref {hashlib.sha256(re.sub(r'[^a-z0-9]', '', str(value).lower()).encode()).hexdigest()[:10]})"
+    return O.entity_id("Identifier", name), name
+
+
 def case_contribution(case: dict[str, Any], profile: Profile, owner: str = "This workspace") -> dict[str, Any] | None:
     """What one assessed case adds to the customer level: the case and what it holds, and the parties and goods it met."""
     a = case.get("assessment")
@@ -458,6 +480,7 @@ def case_contribution(case: dict[str, Any], profile: Profile, owner: str = "This
         if d is None:
             return list(record)
         locator = f"p.{page}" + (f" l.{line}" if line else "") if page else ""
+        quote = mask(quote or "")   # the knowledge base can be exported: a line is quoted with the personal data in it masked
         return [{"citation": {"kind": "document", "document": doc_key[doc_id], "documentEntity": doc_ent[doc_id], "fileName": d["name"], "locator": locator, "quote": (quote or "")[:300],
                               "case": ref, "text": f"{d['name']} {locator}".strip() + (f" — {quote[:160]}" if quote else "")}, "section": section, "how": how}]
 
@@ -518,7 +541,8 @@ def case_contribution(case: dict[str, Any], profile: Profile, owner: str = "This
             products.append(eid)
             c.triple(ce, "caseConcernsProduct", eid, support=sup[:3])
         else:
-            eid = c.entity("Identifier", f"{e['type']} {e['name']}", description=f"{e['type']} reference quoted in the documents.", props={"identifierType": e["type"], "value": e["name"]}, support=sup)
+            nid, shown = identifier_node(e["type"], e["name"])
+            eid = c.entity("Identifier", shown, description=f"{e['type']} reference quoted in the documents.", props={"identifierType": e["type"], "value": mask(e["name"])}, support=sup, eid=nid)
             c.triple(ce, "caseHasIdentifier", eid, support=sup[:3])
         for m in mentions:
             anchor = (docs[m["doc"]].get("fields") or {}).get(m.get("field") or "", {}).get("anchor") or {}
@@ -556,7 +580,7 @@ def case_contribution(case: dict[str, Any], profile: Profile, owner: str = "This
 
     for f in a.get("findings") or []:
         srcs = [s for s in f.get("sources") or [] if s.get("doc") in docs]
-        sup = [x for s in srcs for x in cite(s["doc"], s.get("page"), s.get("line"), s.get("snippet") if s.get("field") != "classification" else "", f.get("agent") or "", "concluded")] or list(record)
+        sup = [x for s in srcs for x in cite(s["doc"], s.get("page"), s.get("line"), s.get("snippet") if s.get("field") not in ("classification", "file") else "", f.get("agent") or "", "concluded")] or list(record)
         fe = c.entity("CaseFinding", scoped(f["title"]), description=f.get("message") or "", confidence=f.get("confidence"), support=sup,
                       props={"status": f.get("status"), "severity": f.get("severity"), "family": f.get("family"), "agent": f.get("agent"), "ruleVersion": (f.get("rule") or {}).get("version")})
         c.triple(ce, "caseHasFinding", fe, props={"status": f.get("status")}, support=record)
@@ -570,7 +594,7 @@ def case_contribution(case: dict[str, Any], profile: Profile, owner: str = "This
                 continue
             seen.add(s["doc"])
             c.triple(fe, "findingCitesDocument", doc_ent[s["doc"]], props={"location": f"p.{s.get('page')}" + (f" l.{s.get('line')}" if s.get("line") else "") if s.get("page") else "", "field": s.get("field_name")},
-                     support=cite(s["doc"], s.get("page"), s.get("line"), s.get("snippet") if s.get("field") != "classification" else "", f.get("agent") or "", "concluded"))
+                     support=cite(s["doc"], s.get("page"), s.get("line"), s.get("snippet") if s.get("field") not in ("classification", "file") else "", f.get("agent") or "", "concluded"))
     return c.data()
 
 
@@ -796,7 +820,8 @@ def build(contributions: list[dict[str, Any]], onto: O.Ontology | None = None) -
                 stats[module]["entities"] += 1
             elif cur["type"] != e["type"] and (onto.is_a(e["type"], cur["type"]) or cur.get("_guessed")):
                 cur["type"] = e["type"]   # the more specific class wins; the id keeps the class it was first created under
-            cur.pop("_guessed", None)
+            if cur.pop("_guessed", None):
+                cur["name"] = e["name"]   # an earlier source linked to it before the source that defines it was read: the name is as that source writes it
             if not e.get("stub"):
                 cur["stub"] = False
             if e.get("level") and e["level"] not in cur.setdefault("_levels", []):   # where each source that says so places it: the first is where it is shown
@@ -927,6 +952,19 @@ def verify(g: dict[str, Any]) -> dict[str, Any]:
             return _squash(pages[int(m.group(1)) - 1])
         return _squash(" ".join(pages))
 
+    masked: dict[str, str] = {}
+
+    def quoted(quote: str, cit: dict[str, Any], text: str) -> bool:
+        """Is the quote in the text it cites? A quote is kept with the personal data in it masked, so it is also looked for in the document masked the same way."""
+        if not quote:
+            return False
+        if quote in text:
+            return True
+        key = cit.get("document") or ""
+        if key not in masked:
+            masked[key] = _squash(" ".join(mask(ln) for p in texts.get(key) or [] for ln in str(p).split("\n")))
+        return quote in masked[key]
+
     def named(e: dict[str, Any], text: str) -> str:
         for n in [e["name"], *e.get("synonyms", [])]:
             n = _squash(re.sub(r"\(.*?\)", " ", n))
@@ -959,8 +997,8 @@ def verify(g: dict[str, Any]) -> dict[str, Any]:
                 quote = _squash(cit.get("quote"))
                 got = named(ents[eid], text)
                 if got == "missing" and ents[eid]["type"] in ("CaseFinding", "Identifier", "Product"):
-                    got = "quoted" if quote and quote in text else named(ents[eid], page_text(cit, wide=True) or "")
-                if got == "missing" and quote and quote in text:
+                    got = "quoted" if quoted(quote, cit, text) else named(ents[eid], page_text(cit, wide=True) or "")
+                if got == "missing" and quoted(quote, cit, text):
                     got = "quoted"
                 if got == "missing" and not quote:
                     got = "unchecked"   # the citation names a document but no line of it: there is nothing to look for
@@ -978,7 +1016,7 @@ def verify(g: dict[str, Any]) -> dict[str, Any]:
                 s["check"] = "unchecked"
             else:
                 quote = _squash(cit.get("quote"))
-                if quote and quote in text:
+                if quoted(quote, cit, text):
                     s["check"] = "quoted"
                 else:
                     whole = page_text(cit, wide=True) or ""
@@ -1518,7 +1556,7 @@ class KnowledgeBase:
             row: dict[str, Any] = {"node": node if node in ents else None, "rule": self._brief(d, rule) if rule in ents else None, "basis": self.basis(rule, case_node) if rule in ents else [], "known": []}
             mem = (f.get("data") or {}).get("memory") or {}
             if mem.get("value"):
-                eid = O.entity_id("Identifier", f"{mem.get('type')} {mem['value']}")
+                eid = identifier_node(str(mem.get("type")), mem["value"])[0]
                 if eid in ents:
                     row["known"].append({**self._brief(d, eid), "cases": mem.get("count") or len(mem.get("cases") or [])})
             for party in mem.get("parties") or []:

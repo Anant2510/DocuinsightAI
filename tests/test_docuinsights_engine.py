@@ -10,6 +10,7 @@ the text; the provenance ledger chains every action and shows tampering."""
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -27,6 +28,14 @@ from docuinsights.service import Service, ServiceError  # noqa: E402
 from docuinsights.store import StoreError  # noqa: E402
 
 T = "default"
+
+
+@pytest.fixture(autouse=True)
+def _own_settings_only(monkeypatch):
+    """No test reads the settings of the machine it runs on: no connected model, no watchlists of its own, nobody to notify."""
+    for name in list(os.environ):
+        if name.startswith(("DOCUINSIGHTS_", "ANTHROPIC_")):
+            monkeypatch.delenv(name)
 
 
 @pytest.fixture()
@@ -67,7 +76,8 @@ def test_review_path_requests_evidence_and_explains_the_absence(svc):
     assert status(c, "RULE-commodity_consistency") == "review" and status(c, "RULE-claim_window") == "pass"
     window = next(f for f in a["findings"] if f["id"] == "RULE-claim_window")
     assert window["data"]["days"] == 17 and window["rule"] == {"id": "claim_window", "version": "1.0", "title": window["title"], "note": window["rule"]["note"], "type": "date_interval"}
-    assert [r["agent"] for r in a["runs"]] == ["intake", "classify", "extract", "resolve", "graph", "evidence", "reference", "policy", "contradiction", "verification"]
+    assert [r["agent"] for r in a["runs"]] == ["intake", "classify", "extract", "privacy", "resolve", "screening", "graph", "evidence", "reference", "policy", "contradiction", "integrity",
+                                               "verification", "triage"]
     assert all(r["status"] == "ok" and r["model"] == "none (code)" for r in a["runs"]) and a["metrics"]["model_calls"] == 0
 
 
@@ -77,9 +87,9 @@ def test_every_finding_carries_its_sources_and_the_verifier_checked_them(svc):
     assert a["recommendation"]["outcome"] == "proceed" and a["recommendation"]["caveats"], "decision-ready, with the snapshot caveat"
     texts = {d["id"]: d["versions"][0]["text"] for d in c["documents"]}
     for f in a["findings"]:
-        assert f["verifier"]["ok"] and f["agent"] and f["rule"] is not None or f["family"] in ("reference", "classification", "sufficiency")
-        for s in f["sources"]:
-            if s["doc"] != "case" and s["field"] != "classification":
+        assert f["verifier"]["ok"] and f["agent"] and f["rule"] is not None or f["family"] in ("reference", "classification", "sufficiency", "properties")
+        for s in f["sources"]:   # a file-level source cites the file by its hash; a privacy source shows its line masked (tested with the privacy agent)
+            if s["doc"] != "case" and s["field"] not in ("classification", "file") and f["family"] != "privacy":
                 assert s["snippet"] and s["snippet"] in texts[s["doc"]], f"{f['id']}: the cited line is in the document"
     scan = next(d for d in c["documents"] if d["name"] == "packing_list.png")
     assert scan["versions"][0]["method"] in ("ocr-local", "ocr-sidecar") and scan["fields"]["packages"]["norm"] == 12.0
@@ -316,9 +326,9 @@ def test_claude_over_the_messages_api_on_the_layers_tiers(svc, tmp_path):
 
 
 # ------------------------------------------------------------------------------------------------ every use case, on the same engine
-EXPECTED = {"supplier_invoice": {"clean": "proceed", "mismatch": "review", "duplicate": "review"}, "insurance_claim": {"clean": "proceed", "out_of_cover": "review"},
+EXPECTED = {"supplier_invoice": {"clean": "proceed", "mismatch": "review", "duplicate": "review", "payment_change": "review"}, "insurance_claim": {"clean": "proceed", "out_of_cover": "review"},
             "loan_application": {"clean": "proceed", "income_mismatch": "review"},
-            "customs_claim": {"review": "request_evidence", "positive": "proceed", "contradiction": "review", "temporal": "review"}, "trade_finance": {"discrepant": "review"}}
+            "customs_claim": {"review": "request_evidence", "positive": "proceed", "contradiction": "review", "temporal": "review"}, "trade_finance": {"discrepant": "review", "listed": "review"}}
 
 
 def test_every_use_case_reaches_its_outcome_and_every_agent_keeps_its_contract(svc):
@@ -328,7 +338,7 @@ def test_every_use_case_reaches_its_outcome_and_every_agent_keeps_its_contract(s
             c = assessed(svc, s["id"], pid)
             a = c["assessment"]
             assert a["recommendation"]["outcome"] == EXPECTED[pid][s["id"]], (pid, s["id"], a["recommendation"]["reasons"])
-            assert a["contracts"]["kept"] == a["contracts"]["runs"] == 10 and not a["contracts"]["broken"], (pid, s["id"], a["contracts"]["broken"])
+            assert a["contracts"]["kept"] == a["contracts"]["runs"] == len(P.STAGES) == 14 and not a["contracts"]["broken"], (pid, s["id"], a["contracts"]["broken"])
             for r in a["runs"]:
                 assert r["plan"]["done"] == len(r["plan"]["tasks"]) and r["plan"]["by"] and set(r["sections"]) == {"read", "wrote"}
                 ct = r["contract"]
@@ -344,8 +354,8 @@ def test_every_use_case_reaches_its_outcome_and_every_agent_keeps_its_contract(s
     assert run["classify"]["grounding"]["by_class"] == {"Document": 4} and run["classify"]["grounding"]["by_level"] == {"domain": 4}
     # with its rules an agent is handed what each rule rests on, from the industry and the domain knowledge bases; the record keeps the count, the finding the content
     handed = run["policy"]["grounding"]
-    assert handed["by_class"]["PolicyRule"] == 11 and {"BestPractice", "Provision", "Term"} <= set(handed["by_class"]) and set(handed["by_level"]) == {"domain", "industry"} and handed["rules_with_basis"] == 11 and "basis" not in handed
-    assert run["verification"]["grounding"]["by_class"] == {"PolicyRule": 11}, "an agent whose contract names only the rules is handed only the rules"
+    assert handed["by_class"]["PolicyRule"] == 20 and {"BestPractice", "Provision", "Term"} <= set(handed["by_class"]) and set(handed["by_level"]) == {"domain", "industry"} and handed["rules_with_basis"] == 20 and "basis" not in handed
+    assert run["verification"]["grounding"]["by_class"] == {"PolicyRule": 20}, "an agent whose contract names only the rules is handed only the rules"
     ruled = [f for f in over["findings"] if f.get("rule")]
     assert ruled and all(f["basis"] and all(set(b) == {"id", "name", "type", "level", "of", "citation", "says"} for b in f["basis"]) for f in ruled), "every finding that applied a rule carries what the rule rests on"
     assert {b["name"] for b in next(f for f in over["findings"] if f["id"] == "RULE-invoice_within_order")["basis"]} >= {"Three-way match"} and over["stages"]["policy"]["basis"] == 3
@@ -368,7 +378,7 @@ def test_every_use_case_reaches_its_outcome_and_every_agent_keeps_its_contract(s
 # ------------------------------------------------------------------------------------------------ contracts and the harness
 def test_the_contracts_are_complete_and_every_check_they_name_exists():
     contracts = C.load()
-    assert set(contracts) == {a["id"] for a in P.AGENTS} and len(contracts) == 16
+    assert set(contracts) == {a["id"] for a in P.AGENTS} and len(contracts) == 20
     for c in contracts.values():
         assert c["purpose"] and c["never"] and c["on_failure"] in ("stop", "degrade", "escalate") and set(c["memory"]) == {"read", "write"}
         assert all(n in C.CHECKS for n in c["needs"]) and all(p["check"] in C.CHECKS and p["text"] for p in c["promises"])
@@ -417,7 +427,7 @@ def test_a_contract_that_is_not_kept_sends_the_case_to_a_person(svc, monkeypatch
     a = assessed(svc, "clean", "supplier_invoice")["assessment"]
     gov = next(f for f in a["findings"] if f["id"] == "GOV-evidence")
     assert a["recommendation"]["outcome"] == "review" and gov["status"] == "review" and "changed 'documents'" in gov["reasoning"][0]
-    assert a["contracts"]["broken"] == [{"agent": "evidence", "why": gov["reasoning"]}] and a["contracts"]["kept"] == 9
+    assert a["contracts"]["broken"] == [{"agent": "evidence", "why": gov["reasoning"]}] and a["contracts"]["kept"] == 13
     monkeypatch.setattr(checks, "evidence", real_evidence)
 
     def careless(case, profile, model):   # the extraction agent promises a line behind every verified value
@@ -478,7 +488,7 @@ def test_model_calls_are_rate_limited_and_a_shed_call_degrades_instead_of_failin
     runs = {r["agent"]: r for r in a["runs"]}
     assert runs["classify"]["model_calls"] == 1 and runs["extract"]["model_calls"] == 1 and runs["extract"]["throttle"]["shed"] == 4
     assert runs["extract"]["status"] == "degraded" and "were not made" in runs["extract"]["notes"][-1] and a["recommendation"]["outcome"] == "review"
-    assert svc.limiter.snapshot()["totals"]["shed"] == 4 and a["contracts"]["kept"] == 10, "shedding is the contract working, not a breach"
+    assert svc.limiter.snapshot()["totals"]["shed"] == 4 and a["contracts"]["kept"] == 14, "shedding is the contract working, not a breach"
 
 
 # ------------------------------------------------------------------------------------------------ shared memory
@@ -516,7 +526,7 @@ def test_the_knowledge_base_is_a_kb_forge_knowledge_base_that_grows_with_every_c
 
     empty = svc.knowledge_overview(T)
     assert set(empty["index"]["byLevel"]) == {"industry", "domain", "solution"} and empty["sources"]["cases"] == 0, "before any case: the industries, what the use cases declare, and the accelerator's agents"
-    assert [(lv["id"], lv["heads"]) for lv in empty["levels"]] == [("industry", 5), ("domain", 1), ("solution", 1), ("customer", 0)] and empty["index"]["byLevel"]["solution"] == 17
+    assert [(lv["id"], lv["heads"]) for lv in empty["levels"]] == [("industry", 5), ("domain", 1), ("solution", 1), ("customer", 0)] and empty["index"]["byLevel"]["solution"] == 21
     assert empty["format"] == {"name": "KB Forge knowledge base", "schemaVersion": "1.0"}
     for sample, pid in (("clean", "supplier_invoice"), ("mismatch", "supplier_invoice"), ("clean", "loan_application"), ("positive", "customs_claim")):
         assessed(svc, sample, pid)
@@ -578,7 +588,7 @@ def test_the_knowledge_base_is_a_kb_forge_knowledge_base_that_grows_with_every_c
     assert cit["kind"] == "document" and cit["locator"].startswith("p.1 l.") and "Calder Vale Foods Ltd" in cit["quote"] and sup["check"] == "named" and sup["how"] == "extracted"
     stats = prov["verification"]["stats"]
     assert stats["missing"] == 0 and stats["quoted"] > 100 and stats["named"] > 10 and set(prov["verification"]["origins"]["entities"]) == {"document", "system", "settings", "web", "curated"}
-    assert prov["verification"]["origins"]["entities"]["curated"] == 289, "what the curated industry and domain knowledge bases state is marked as curated, apart from what was read in a document"
+    assert prov["verification"]["origins"]["entities"]["curated"] == 315, "what the curated industry and domain knowledge bases state is marked as curated, apart from what was read in a document"
     q = json.loads((root / "quality/metrics.json").read_text())
     assert q["score"] > 85 and set(q["components"]) == set(q["weights"]) and sum(q["weights"].values()) == 100
 
@@ -657,7 +667,7 @@ def test_knowledge_built_in_kb_forge_is_read_as_kb_forge_writes_it(svc):
     assert supplier["type"] == "MarketplaceVendor" and supplier["confidence"] == 0.9 and "Penrose Pack" in supplier["synonyms"], "the vendor is the supplier the case met"
     assert KB.level_of(supplier) == "customer" and KB.level_of(d["entities"]["finding/slow-checkout"]) == "industry" and d["entities"]["finding/slow-checkout"]["confidence"] == 0.35
     added = {"organizationtype/packaging-vendor", "finding/slow-checkout", "industrysegment/airlines", "vendor/unknown-carrier"}
-    assert got["import"]["placed"] == "industry" and d["index"]["byLevel"]["industry"] == 223 + 4 and d["index"]["stubs"] == 1 and added <= {n["id"] for n in kb.subgraph(levels=["industry"], limit=600)["nodes"]}, "an industry knowledge base sits at the industry level"
+    assert got["import"]["placed"] == "industry" and d["index"]["byLevel"]["industry"] == 224 + 4 and d["index"]["stubs"] == 1 and added <= {n["id"] for n in kb.subgraph(levels=["industry"], limit=600)["nodes"]}, "an industry knowledge base sits at the industry level"
     assert svc.knowledge_import(T, "airlines.zip", data, level="domain")["import"]["placed"] == "domain" and KB.level_of(kb.load()["entities"]["finding/slow-checkout"]) == "domain", "or at the level chosen when it is added"
     assert next(t for t in d["triples"] if t["predicate"] == "painPointInIndustry")["confidence"] == 0.65 and kb.aliases() == {"penrose pack": "penrose packaging supplies"}
     # an added knowledge base is managed like the others: moved to another level, taken out, put back; each is in the ledger
@@ -905,7 +915,7 @@ def test_the_ledger_chains_every_action_and_shows_tampering(svc, tmp_path):
     assert fresh["index"]["build"] == KB.BUILD and [lv["id"] for lv in fresh["levels"]] == ["industry", "domain", "solution", "customer"] and all(lv["entities"] for lv in fresh["levels"])
     assert len(svc.episodes(T).all()) == 1, "and what the workspace remembers of each case is not doubled"
     platform = svc.platform(T)
-    assert platform["contracts"]["runs"] == platform["contracts"]["kept"] == 10 and platform["memory"]["episodes"] == 1 and not platform["provenance"]["ledger"]["ok"]
+    assert platform["contracts"]["runs"] == platform["contracts"]["kept"] == 14 and platform["memory"]["episodes"] == 1 and not platform["provenance"]["ledger"]["ok"]
     assert platform["throttling"]["model"]["limits"]["calls_per_minute"] == 60 and platform["throttling"]["assessments"]["max_at_once"] == 2
 
 
@@ -942,7 +952,7 @@ def test_the_http_api_serves_the_workbench_and_guards_the_api(tmp_path, monkeypa
         assert client.get("/api/cases").status_code == 200 and client.get("/api/cases", headers={"X-Forwarded-For": "203.0.113.9"}).status_code == 401
         assert client.get("/api/cases", headers={"X-Original-URL": "/docuinsights/api/cases"}).status_code == 401 and client.get("/health", headers={"X-Forwarded-For": "203.0.113.9"}).status_code == 200
         cfg = client.get("/api/config").json()
-        assert len(cfg["agents"]) == 16 and {p["id"] for p in cfg["profiles"]} >= {"customs_claim", "trade_finance"}
+        assert len(cfg["agents"]) == 20 and {p["id"] for p in cfg["profiles"]} >= {"customs_claim", "trade_finance"}
         out = client.post("/api/v1/cases", json={"reference": "API-1", "profile": "trade_finance", "fields": {"presentation_date": "2026-11-06"},
                                                  "documents": [{"name": "note.txt", "text": "COMMERCIAL INVOICE\nInvoice No: X-1\nInvoice Total: USD 10.00"}]}).json()
         assert out["outcome"] == "request_evidence" and out["documents"][0]["type"] == "commercial_invoice" and out["documents"][0]["fields"]["invoice_number"] == "X-1"
@@ -968,9 +978,9 @@ def test_the_http_api_serves_the_workbench_and_guards_the_api(tmp_path, monkeypa
         assert added.status_code == 201 and added.json()["import"]["id"] == "extra" and client.post("/api/knowledge/imports", json={"name": "x.txt", "content_base64": "aGk="}).status_code == 400
         assert client.post("/api/knowledge/imports/extra/remove", json={}).status_code == 200 and client.post("/api/knowledge/imports/extra/remove", json={}).status_code == 404
         plat = client.get("/api/platform").json()
-        assert plat["contracts"]["runs"] == plat["contracts"]["kept"] == 10 and plat["provenance"]["ledger"]["ok"] and plat["memory"]["episodes"] == 1
+        assert plat["contracts"]["runs"] == plat["contracts"]["kept"] == 14 and plat["provenance"]["ledger"]["ok"] and plat["memory"]["episodes"] == 1
         led = client.get("/api/ledger?case=API-1").json()
-        assert led["verify"]["ok"] and len([e for e in led["entries"] if e["kind"] == "agent_run"]) == 10
+        assert led["verify"]["ok"] and len([e for e in led["entries"] if e["kind"] == "agent_run"]) == 14
     monkeypatch.setenv("DOCUINSIGHTS_API_KEY", "s3cret")
     with TestClient(create_app(Service(tmp_path / "data2"))) as client:
         assert client.get("/api/cases").status_code == 401 and client.get("/api/cases", headers={"Authorization": "Bearer s3cret"}).status_code == 200

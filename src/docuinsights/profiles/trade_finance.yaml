@@ -55,6 +55,7 @@ document_types:
       - {id: lc_number, name: Credit number quoted, type: ref, labels: [Documentary Credit Number, Credit Number, LC Number]}
       - {id: goods_description, name: Description of goods, type: text, labels: [Description of Goods], required: true}
       - {id: quantity, name: Quantity, type: number, labels: [Quantity]}
+      - {id: unit_price, name: Unit price, type: money, labels: [Unit Price]}
       - {id: total, name: Invoice total, type: money, labels: [Invoice Total, Total Amount], required: true}
   - id: bill_of_lading
     name: Bill of lading
@@ -66,6 +67,7 @@ document_types:
       - {id: shipper, name: Shipper, type: party, labels: [Shipper], required: true}
       - {id: consignee, name: Consignee, type: text, labels: [Consignee]}
       - {id: notify_party, name: Notify party, type: party, labels: [Notify Party]}
+      - {id: vessel, name: Vessel, type: text, labels: [Vessel / Voyage, Vessel]}
       - {id: port_of_loading, name: Port of loading, type: text, labels: [Port of Loading], required: true}
       - {id: port_of_discharge, name: Port of discharge, type: text, labels: [Port of Discharge], required: true}
       - {id: packages, name: Number of packages, type: number, labels: [No. of Packages, Number of Packages]}
@@ -213,6 +215,28 @@ consistency:
   - {id: invoice_reference, family: goods, title: Documents refer to the same invoice, kind: ref, severity: medium,
      fields: [commercial_invoice.invoice_number, packing_list.invoice_ref, certificate_of_origin.invoice_ref]}
 
+# What the integrity agent is told about this use case. Each line is a deterministic check; none is a model's opinion.
+integrity:
+  sums:
+    - {id: invoice_arithmetic, title: The invoice's quantity and unit price give its total, kind: product, parts: [commercial_invoice.quantity, commercial_invoice.unit_price], equals: commercial_invoice.total}
+  issued: [letter_of_credit.issue_date, commercial_invoice.invoice_date, bill_of_lading.shipped_date, insurance_certificate.cover_date]
+
+# Every party is screened, and so are the vessel and the ports the bill of lading names.
+screening:
+  fields:
+    - {field: bill_of_lading.vessel, kind: vessel}
+    - {field: bill_of_lading.port_of_loading, kind: place}
+    - {field: bill_of_lading.port_of_discharge, kind: place}
+
+# The examination period: a bank has at most five banking days following the day of presentation (UCP 600 article 14(b)).
+service:
+  target_days: 5
+  clock: working
+  starts: case.presentation_date
+  value: letter_of_credit.credit_amount
+  high_value: 250000
+  note: Five banking days following the day of presentation (UCP 600 article 14(b)); public holidays are not counted here. The high-value line is illustrative.
+
 outcomes:
   proceed: {label: Complying presentation, description: "The documents are complete, in time, within the credit and consistent with each other."}
   request_evidence: {label: Request missing documents, description: "A document the credit calls for has not been presented."}
@@ -259,5 +283,16 @@ samples:
       - {file: letter_of_credit.pdf, category: letter_of_credit}
       - {file: invoice.pdf, category: commercial_invoice}
       - {file: bill_of_lading.pdf, category: bill_of_lading}
+      - {file: packing_list.pdf, category: packing_list}
+      - {file: certificate_of_origin.pdf, category: certificate_of_origin}
+  - id: listed
+    title: A carrier and a vessel on a watchlist
+    story: "The same presentation, but the bill of lading names a carrier and a vessel that match the demonstration watchlist (invented names), the carrier through a different spelling. Screening finds both and the case goes to compliance before anyone else."
+    path: trade_finance
+    case: {reference: PRES-2026-00744, presentation_date: "2026-11-09", received_date: "2026-11-09"}
+    documents:
+      - {file: letter_of_credit.pdf, category: letter_of_credit}
+      - {file: invoice.pdf, category: commercial_invoice}
+      - {file: bill_of_lading_listed.pdf, category: bill_of_lading}
       - {file: packing_list.pdf, category: packing_list}
       - {file: certificate_of_origin.pdf, category: certificate_of_origin}

@@ -45,6 +45,19 @@ class Profile:
         self.sector: str = raw.get("sector") or ""              # the kind of organisation that runs it
         self.plain: str = raw.get("plain") or self.description  # what it does, in one sentence anyone can read
         self.memory: dict[str, Any] = raw.get("memory") or {}
+        # the assurance agents: what each is told about this use case (all four work without a word here)
+        self.integrity: dict[str, Any] = raw.get("integrity") or {}   # sums, check digits, dates and details that must not change
+        self.screening: dict[str, Any] = raw.get("screening") or {}   # who is screened against the watchlists
+        self.privacy: dict[str, Any] = raw.get("privacy") or {}       # personal data the use case does not expect
+        self.service: dict[str, Any] = raw.get("service") or {}       # the service target a case is triaged against
+        self.formats: dict[str, Any] = raw.get("formats") or {}       # how its documents write a date: {dates: day_first | month_first}
+        order = self.formats.get("dates") or "day_first"
+        if order not in ("day_first", "month_first"):
+            raise ProfileError(f"{self.id}: formats.dates is day_first or month_first")
+        for t in self.types.values():   # each date field reads the way the use case says, unless the field says otherwise itself
+            for f in t.get("fields") or []:
+                if f.get("type") == "date":
+                    f.setdefault("order", order)
         self._check()
 
     def _check(self) -> None:
@@ -65,6 +78,11 @@ class Profile:
                         continue
                     if head not in known or fld not in {f["id"] for f in self.types[head].get("fields") or []}:
                         raise ProfileError(f"{self.id}: rule '{r.get('id')}' refers to unknown field '{ref}'")
+        from . import assurance   # imported here: it reads profiles
+
+        wrong = assurance.check_profile(self)
+        if wrong:
+            raise ProfileError(f"{self.id}: " + "; ".join(wrong))
 
     def type_name(self, type_id: str | None) -> str:
         return (self.types.get(type_id or "") or {}).get("name") or (type_id or "Unclassified")
@@ -87,7 +105,7 @@ class Profile:
 
     def summary(self) -> dict[str, Any]:
         return {"id": self.id, "name": self.name, "version": self.version, "description": self.description, "brand": self.brand, "sector": self.sector, "plain": self.plain,
-                "memory": self.memory, "consistency": [{"id": r["id"], "title": r.get("title"), "kind": r.get("kind")} for r in self.consistency],
+                "memory": self.memory, "service": self.service, "assurance": self._assurance(), "consistency": [{"id": r["id"], "title": r.get("title"), "kind": r.get("kind")} for r in self.consistency],
                 "case": self.case, "document_types": [{"id": t["id"], "name": t.get("name") or t["id"], "group": t.get("group") or "",
                                                        "fields": [{"id": f["id"], "name": f.get("name") or f["id"], "type": f.get("type", "text"),
                                                                    "required": bool(f.get("required"))} for f in t.get("fields") or []]}
@@ -98,6 +116,11 @@ class Profile:
                                      "value": (c.get("change") or {}).get("value") if c.get("ask") else None} for c in self.counterfactuals],
                 "samples": [{"id": s["id"], "title": s.get("title"), "path": s.get("path"), "story": s.get("story")} for s in self.samples],
                 "reference_sources": [{"id": r["id"], "name": r.get("name"), "connector": r.get("connector")} for r in self.references]}
+
+    def _assurance(self) -> list[dict[str, Any]]:
+        from . import assurance
+
+        return [{"key": r["key"], "title": r["title"], "kind": r["kind"], "family": r["family"]} for r in assurance.declared_rules(self)]
 
 
 def _refs_of(rule: dict[str, Any]) -> list[str]:

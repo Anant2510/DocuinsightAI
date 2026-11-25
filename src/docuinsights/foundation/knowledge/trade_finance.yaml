@@ -136,7 +136,8 @@ risks:
     says: A party, vessel, port or the goods are subject to sanctions.
     signs: ["A listed party, vessel or port named in the documents"]
     affects: [Trade transaction screening]
-    checked: "no: sanctions lists are not read here"
+    caught_by: ["rule:trade_finance/screening.parties"]
+    checked: "in part: parties, the vessel and the ports are compared with the lists the installation loads (the shipped list is invented, for demonstration); the goods are not screened"
 
 kpis:
   - {name: Discrepancy rate on first presentation, says: "The share of presentations that show at least one discrepancy when first presented.", unit: "%", better: lower}
@@ -179,3 +180,5 @@ basis:
     evidence.packing: [UCP 600 article 14(a)]
     evidence.origin: [UCP 600 article 14(a)]
     evidence.insurance: [UCP 600 article 28(e), UCP 600 article 28(f)(ii), Incoterms 2020]
+    integrity.invoice_arithmetic: [Recalculation of stated totals]
+    screening.parties: [FATF Recommendations]
