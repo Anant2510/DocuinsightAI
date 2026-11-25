@@ -6,7 +6,8 @@
 #   promises   checked after it ends; a broken promise is recorded and sends the case to a person
 #   writes     the parts of the case the agent may change; a change anywhere else breaks the contract
 #   reads      the parts of the case it works from; the harness records which agents wrote them (the run's shared memory)
-#   grounding  the classes of the knowledge graph the harness hands it before it starts, for the case's use case
+#   grounding  the classes of the knowledge graph the harness hands it before it starts, for the case's use case. With its rules
+#              an agent is handed what each rule rests on (the provision, practice or term), and puts that on each finding.
 #   model      `none` hands the agent no model at all; otherwise a call past max_calls or max_tokens is refused
 #   memory     the memory scopes it may read and write; anything else is refused
 #   limits     a run longer than timeout_s is reported; retries apply to a failed run
@@ -108,7 +109,7 @@ contracts:
     never: ["treat an unreadable file as evidence", "use a model"]
     writes: [findings, graph]
     reads: [documents, graph]
-    grounding: [PolicyRule, Document]
+    grounding: [PolicyRule, Document, Provision, BestPractice, Term, Standard, Regulation]
     model: {use: none}
     memory: {read: [run, case], write: [run]}
     limits: {timeout_s: 60, retries: 0}
@@ -137,7 +138,7 @@ contracts:
     never: ["use a model", "apply a rule the use case does not declare"]
     writes: [findings, graph]
     reads: [documents, references, graph]
-    grounding: [PolicyRule]
+    grounding: [PolicyRule, Provision, BestPractice, Term, Standard, Regulation]
     model: {use: none}
     memory: {read: [run, case], write: [run]}
     limits: {timeout_s: 60, retries: 0}
@@ -151,7 +152,7 @@ contracts:
     never: ["use a model", "decide which document is right"]
     writes: [findings, graph]
     reads: [documents, graph]
-    grounding: [PolicyRule]
+    grounding: [PolicyRule, Provision, BestPractice, Term, Standard, Regulation]
     model: {use: none}
     memory: {read: [run, case], write: [run]}
     limits: {timeout_s: 60, retries: 0}
@@ -210,7 +211,7 @@ contracts:
     on_failure: degrade
 
   - id: assistant
-    purpose: "Answers a question about one case from its graph and its documents, cites what it used, and declines what they do not hold."
+    purpose: "Answers a question about one case from its graph, its documents and what the knowledge graph says its rules rest on, cites what it used, and declines what they do not hold."
     needs: [case_is_assessed]
     promises:
       - {check: answer_is_grounded_or_declined, text: An answer cites its sources or says the case does not hold the answer.}

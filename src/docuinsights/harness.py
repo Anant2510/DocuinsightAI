@@ -120,6 +120,7 @@ class Harness:
         ground = getattr(self.tools, "ground", None)
         grounding = ground(agent, case, profile, contract["grounding"]) if ground and contract.get("grounding") else None
         scoped.grounding = grounding
+        handed = grounding and {**{k: v for k, v in grounding.items() if k != "basis"}, **({"rules_with_basis": len(grounding["basis"])} if grounding.get("basis") else {})}   # the record keeps the count, the agent the content
         writers: dict[str, list[str]] = w.setdefault("writers", {}) if w is not None else {}
         kept: dict[str, list[str]] = case.setdefault("authors", {})   # the parts of a case that outlive an assessment (its documents): who wrote them, across assessments
         read = [{"section": sec, "from": [x for x in dict.fromkeys([*(kept.get(sec) or []), *(writers.get(sec) or [])]) if x != agent["id"]]}
@@ -149,7 +150,7 @@ class Harness:
                         broken.append(f"promise not kept: {p.get('text') or p['check']} ({detail})")
             trace["contract"].update(kept=not broken, broken=broken)
             trace.update(duration_ms=ms, touched=touched, budget=budget.snapshot(), throttle={"waited_ms": model.waited_ms, "shed": model.shed}, memory=memory.summary(),
-                         sections={"read": read, "wrote": touched}, grounding=grounding)
+                         sections={"read": read, "wrote": touched}, grounding=handed)
             for sec in touched:   # the run's shared memory: who has written each part of the case so far
                 if agent["id"] not in writers.setdefault(sec, []):
                     writers[sec].append(agent["id"])

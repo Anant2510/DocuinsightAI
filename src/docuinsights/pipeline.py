@@ -129,7 +129,15 @@ def _run_stage(stage: str, case: dict[str, Any], profile: Profile, tools: Tools,
     else:
         raise ValueError(f"unknown stage '{stage}'")
     if stage != "verify":
-        w["findings"] = [f for f in w["findings"] if f["agent"] != _agent_key(stage)] + out.pop("findings", [])
+        found = out.pop("findings", [])
+        rests = (tools.grounding or {}).get("basis") or {}   # what the knowledge graph says each rule rests on, as the harness handed it to this agent
+        for f in found:
+            got = rests.get((f.get("rule") or {}).get("title") or "")
+            if got:
+                f["basis"] = got
+        if rests:
+            out["basis"] = sum(1 for f in found if f.get("basis"))
+        w["findings"] = [f for f in w["findings"] if f["agent"] != _agent_key(stage)] + found
     w["graph"] = graphs.finish(g)
     out["graph_writes"] = {"nodes": len(g["nodes"]) - before[0], "edges": len(g["edges"]) - before[1]}
     return out

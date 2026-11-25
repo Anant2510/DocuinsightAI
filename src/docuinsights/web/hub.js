@@ -3,7 +3,7 @@
 (function () {
   "use strict";
   const root = document.getElementById("app"), BASE = root.dataset.base || "";
-  const S = { cfg: null, cases: [], c: null, view: "home", sel: {}, chat: false, chatLog: [], cf: null, draft: null, fb: null, timer: null, filter: { status: "attention", family: "all" }, layers: { document: true, entity: true, reference: true, reasoning: false, assertion: false }, k: { ov: null, g: null, m: null, e: null, view: "map", open: ["industry", "domain", "solution", "customer"], drill: [], levels: ["industry", "domain"], hits: null, q: "", place: "" }, pf: null,
+  const S = { cfg: null, cases: [], c: null, view: "home", sel: {}, chat: false, chatLog: [], cf: null, draft: null, fb: null, timer: null, filter: { status: "attention", family: "all" }, layers: { document: true, entity: true, reference: true, reasoning: false, assertion: false }, k: { ov: null, g: null, m: null, e: null, view: "map", open: ["industry", "domain", "solution", "customer"], drill: [], levels: ["industry", "domain"], hits: null, q: "", place: "", hide: [], more: null, back: null, jump: false }, ck: null, pf: null,
     orch: { t: null, playing: false, speed: 1, auto: false, sel: null, timer: null } };
 
   // ---------------------------------------------------------------------------------------------- helpers
@@ -76,9 +76,16 @@
   // ---------------------------------------------------------------------------------------------- data
   async function start() {
     try { S.cfg = await api("config"); S.cases = await api("cases"); } catch (err) { if (err.status === 401) { root.replaceChildren(h("p", { class: "boot" }, "Waiting for a key…")); return signIn(err.message); } root.replaceChildren(h("p", { class: "boot" }, err.message)); return; }
-    render();
+    render(); fromAddress();
   }
-  async function open(ref, view) { clearInterval(S.orch.timer); S.orch = { t: null, playing: false, speed: S.orch.speed || 1, auto: !!S.orch.auto, sel: null, timer: null, ticks: 0 }; S.c = await api("cases/" + encodeURIComponent(ref)); S.view = view || (A() ? "summary" : "monitor"); S.sel = {}; S.cf = null; S.draft = null; S.chatLog = (S.c.chat || []).flatMap((m) => [{ r: "u", t: m.question }, { r: "a", t: m.answer, no: !m.grounded }]); watch(); render(); }
+  const linked = () => { const m = /^#\/knowledge\/(.+)$/.exec(location.hash || ""); try { return m ? decodeURIComponent(m[1]) : null; } catch (err) { return null; } };
+  function fromAddress() {   // a link to one node of the knowledge graph: open the graph on exactly that node
+    const id = linked();
+    if (!id || !S.cfg || (S.view === "knowledge" && S.k.e && S.k.e.entity.id === id)) return;
+    kOpen(id).catch((err) => { if (err.status === 401) return signIn(err.message); toast(err.status === 404 ? "That node is not in the knowledge graph any more." : err.message); kHash(null); top("knowledge")(); });
+  }
+  window.addEventListener("hashchange", fromAddress);
+  async function open(ref, view) { clearInterval(S.orch.timer); S.orch = { t: null, playing: false, speed: S.orch.speed || 1, auto: !!S.orch.auto, sel: null, timer: null, ticks: 0 }; S.c = await api("cases/" + encodeURIComponent(ref)); S.k.back = null; kHash(null); S.view = view || (A() ? "summary" : "monitor"); S.sel = {}; S.cf = null; S.draft = null; S.chatLog = (S.c.chat || []).flatMap((m) => [{ r: "u", t: m.question }, { r: "a", t: m.answer, no: !m.grounded }]); watch(); render(); }
   function setCase(c, view) { S.c = c; if (view) S.view = view; watch(); render(); }
   function watch() {
     clearTimeout(S.timer);
@@ -92,7 +99,7 @@
   const TOP = [["home", "Home"], ["cases", "Cases"], ["knowledge", "Knowledge"], ["agents", "Agents"], ["platform", "How it is governed"]];
   const mapQuery = () => "open=" + S.k.open.join(",") + S.k.drill.map((d) => "&drill=" + encodeURIComponent(d)).join("");
   const top = (view) => run(async () => {   // a screen of the workspace (no case open): load what it shows, then draw it
-    clearTimeout(S.timer); clearInterval(S.orch.timer); S.orch.playing = false; S.c = null; S.sel = {};
+    clearTimeout(S.timer); clearInterval(S.orch.timer); S.orch.playing = false; S.c = null; S.sel = {}; kHash(null); if (view !== "knowledge") S.k.back = null;
     if (view === "home" || view === "cases") S.cases = await api("cases");
     if (view === "knowledge") { S.k.ov = await api("knowledge"); S.k.m = await api("knowledge/map?" + mapQuery());
       if (!S.k.touched && !S.k.drill.length) { S.k.drill = S.k.m.levels.filter((l) => l.heads === 1).map((l) => (S.k.m.nodes.find((n) => n.level === l.id && !n.from) || {}).id).filter(Boolean); if (S.k.drill.length) S.k.m = await api("knowledge/map?" + mapQuery()); } S.k.g = S.k.view === "network" ? await api("knowledge/graph?levels=" + S.k.levels.join(",")) : null; S.k.e = null; S.k.hits = null; }
@@ -114,6 +121,7 @@
     add(main, (views[S.view] || home)());
     const shell = h("div", { class: "shell" + (S.c ? "" : " wide") }, S.c ? rail(running) : null, main);
     root.replaceChildren(...[bar, shell, S.c && a ? chat() : null].filter(Boolean));
+    if (S.k.jump) { S.k.jump = false; requestAnimationFrame(() => { const el = document.querySelector("svg.lmap g.nd.sel"); if (el && el.scrollIntoView) el.scrollIntoView({ block: "center" }); }); }
   }
   function rail(running) {
     const a = A(), count = (pred) => F(pred).length, n = (v, cls) => (v ? h("span", { class: "n " + (cls || "") }, v) : null);
@@ -141,7 +149,7 @@
     const base = [["Agent contracts", "Every agent has a written contract: what it needs, what it promises, what it must never do.", "agents"],
       ["Agent harness", "One harness runs every agent, checks its contract before and after, and records the run.", "platform"],
       ["Shared memory", "Agents leave notes for each other, and the workspace recognises what an earlier case already held.", "platform"],
-      ["Knowledge graph", "Everything learned is one graph that grows with every case, kept in the KB Forge format.", "knowledge"],
+      ["Knowledge graph", "What each industry works under, what each use case asks for and what every case taught, as one graph in the KB Forge format. Every finding opens the exact node it rests on.", "knowledge"],
       ["Evidence provenance", "Every conclusion points to a line of a document, and every action is in a tamper-evident ledger.", "platform"],
       ["Throttling", "Model calls are rate limited and budgeted per agent. At the limit an agent falls back; it does not fail.", "platform"]];
     return [h("div", { class: "hero" }, h("h1", null, "Give it the documents. Get back a recommendation you can check."),
@@ -198,8 +206,9 @@
 
   // ---------------------------------------------------------------------------------------------- knowledge
   const KCOL = { IndustrySegment: "#2c62c9", ExperienceDomain: "#0f5c3a", UseCase: "#1b7f52", Document: "#4a9c74", PolicyRule: "#8fbfa6", Role: "#c3d9cd", ReferenceSource: "#c79a1a", ReferenceEntry: "#e0c063", Accelerator: "#c4511a", SoftwareAgent: "#ee6c2b",
-    Company: "#5a3794", Organization: "#7a4fb5", Product: "#a887d6", Case: "#3d2a6b", SourceDocument: "#8fa9d8", Identifier: "#b9a3dc", CaseFinding: "#c9c2d8" };
-  const ORIGIN_PILL = { document: "pass", system: "info", settings: "info", web: "info", imported: "review", inferred: "", decision: "pass", unverified: "fail", unknown: "" };
+    Company: "#5a3794", Organization: "#7a4fb5", Product: "#a887d6", Case: "#3d2a6b", SourceDocument: "#8fa9d8", Identifier: "#b9a3dc", CaseFinding: "#c9c2d8",
+    Standard: "#1d4ea0", Regulation: "#16408a", Provision: "#6f93d6", StandardsBody: "#9bb4e4", BusinessProcess: "#0e8f8f", Risk: "#b8342b", KPI: "#c79a1a", Term: "#8a93a3", BestPractice: "#2f9e6e", Capability: "#57b894", Challenge: "#d9822b", PainPoint: "#d9822b" };
+  const ORIGIN_PILL = { document: "pass", system: "info", settings: "info", web: "info", curated: "info", manual: "review", imported: "review", inferred: "", decision: "pass", unverified: "fail", unknown: "" };
   let kKey = "", kPos = null;
   function spread(nodes, links, W, H) {   // Fruchterman-Reingold with a deterministic start, as on the case graph
     const pos = {}, n0 = nodes.length || 1, k = Math.sqrt((W * H) / n0) * 0.7;
@@ -213,17 +222,38 @@
     }
     return pos;
   }
-  const kEntity = (id) => run(async () => { S.k.e = await api("knowledge/entity?id=" + encodeURIComponent(id)); render(); });
+  // Getting to a node. Every node has an address of its own (#/knowledge/<id>): opening it opens the level map along the way down to it.
+  const kHash = (id) => { try { history.replaceState(null, "", id ? "#/knowledge/" + encodeURIComponent(id) : location.pathname + location.search); } catch (err) { /* a frame that may not touch the address */ } };
+  const kLink = (id) => location.origin + location.pathname + location.search + "#/knowledge/" + encodeURIComponent(id);
+  async function kOpen(id) {
+    clearTimeout(S.timer); clearInterval(S.orch.timer); S.orch.playing = false;
+    const e = await api("knowledge/entity?id=" + encodeURIComponent(id));
+    if (!S.k.ov) S.k.ov = await api("knowledge");
+    const fresh = S.view !== "knowledge" || !!S.c;   // arriving from a case or another screen: the map shows the way to this node and nothing else opened
+    const m = await api("knowledge/map?" + (fresh ? "open=" + S.k.open.join(",") : mapQuery()) + "&show=" + encodeURIComponent(id));
+    if (S.c) S.k.back = S.c.reference;
+    Object.assign(S.k, { e, m, open: m.open, drill: m.drilled, view: "map", touched: true, jump: true, hits: null, hide: [], more: null });
+    S.c = null; S.sel = {}; S.view = "knowledge"; kHash(id); render();
+  }
+  const kShow = (id) => run(() => kOpen(id));
+  const kEntity = (id) => run(async () => { S.k.e = await api("knowledge/entity?id=" + encodeURIComponent(id)); S.k.more = null; kHash(id); render(); });
   const kGraph = (query) => run(async () => { S.k.g = await api("knowledge/graph?" + query); render(); });
   const kMap = () => run(async () => { S.k.m = await api("knowledge/map?" + mapQuery()); render(); });
+  const kReload = async (keep) => { S.ck = null; S.k.ov = await api("knowledge"); S.k.m = await api("knowledge/map?" + mapQuery()); if (!keep) { S.k.e = null; kHash(null); } S.k.g = null; if (S.k.view === "network") S.k.view = "map"; render(); };
   const words = (name) => name.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase();
   const LCOL = { industry: "#2c62c9", domain: "#1b7f52", solution: "#ee6c2b", customer: "#7a4fb5", added: "#7a8496" };
   const LVL = { industry: "Industry", domain: "Domain", solution: "Solution", customer: "Customer", added: "Added" };
+  const kShort = (name) => String(name).split(": ")[0];   // an article is named with its subject ("UCP 600 article 14(c): presentation within 21 days"); a chip shows the reference
+  const dot = (type, level) => h("i", { class: "kdot", style: "background:" + (KCOL[type] || LCOL[level] || "#7a8496") });
+  const kchip = (node, label, title) => h("button", { class: "kchip", type: "button", style: "border-left-color:" + (LCOL[node.level] || "#7a8496"), title: title || words(node.type || "") + ", " + (LVL[node.level] || "added").toLowerCase() + " level: open it in the knowledge graph", onclick: kShow(node.id) }, label);
+  const statusPills = (by) => ["fail", "missing", "review", "pass", "info"].filter((s) => by[s]).map((s) => pill(s, by[s] + " " + s));
   function levelMap() {   // KB Forge's level map: the levels as boxes, stacked top-down, each level's band to its right; drilling only goes down
     const m = S.k.m, W = 940, BOX = 168, X0 = BOX + 22, LAB = 104, PER = 4, COL = (W - X0 - LAB - 10) / PER, ROW = 36, sel = S.k.e ? S.k.e.entity.id : null, pos = {}, bands = [];
+    const trail = S.k.e ? S.k.e.trail.map((x) => x.id) : [], onTrail = new Set(trail), hide = S.k.hide || [];
+    const shown = m.nodes.filter((n) => !hide.includes(n.type) || n.id === sel || onTrail.has(n.id));
     let y = 8;
     m.levels.forEach((lv) => {
-      const nodes = m.nodes.filter((n) => n.level === lv.id).sort((a, b) => a.depth - b.depth || a.type.localeCompare(b.type) || (a.from || "").localeCompare(b.from || "") || a.name.localeCompare(b.name));
+      const nodes = shown.filter((n) => n.level === lv.id).sort((a, b) => a.depth - b.depth || a.type.localeCompare(b.type) || (a.from || "").localeCompare(b.from || "") || a.name.localeCompare(b.name));
       let row = -1, col = 0, kind = null; const rows = [];
       nodes.forEach((n) => { const k = n.depth + ":" + n.type; if (k !== kind) { row++; col = 0; kind = k; rows.push({ row, type: n.type }); } else if (col >= PER) { row++; col = 0; } pos[n.id] = { x: X0 + LAB + 10 + col * COL, y: y + 26 + row * ROW }; col++; });
       const heads = nodes.filter((n) => !n.from).length, rest = m.open.includes(lv.id) && lv.heads > heads ? lv.heads - heads : 0;   // a level shows its best connected heads; the rest are a search away
@@ -232,7 +262,7 @@
     });
     const H = y, near = new Set(m.links.filter((l) => l.s === sel || l.o === sel).flatMap((l) => [l.s, l.o]));
     const toggle = (id) => { S.k.touched = true; S.k.open = S.k.open.includes(id) ? S.k.open.filter((x) => x !== id) : [...S.k.open, id]; kMap()(); };
-    const drill = (n) => run(async () => { S.k.touched = true; S.k.drill = S.k.drill.includes(n.id) ? S.k.drill.filter((x) => x !== n.id) : n.below ? [...S.k.drill, n.id] : S.k.drill; S.k.e = await api("knowledge/entity?id=" + encodeURIComponent(n.id)); S.k.m = await api("knowledge/map?" + mapQuery()); render(); });
+    const drill = (n) => run(async () => { S.k.touched = true; S.k.more = null; S.k.drill = S.k.drill.includes(n.id) ? S.k.drill.filter((x) => x !== n.id) : n.below ? [...S.k.drill, n.id] : S.k.drill; S.k.e = await api("knowledge/entity?id=" + encodeURIComponent(n.id)); S.k.m = await api("knowledge/map?" + mapQuery()); kHash(n.id); render(); });
     const curve = (a, b) => "M" + a.x + "," + a.y + " C" + a.x + "," + (a.y + b.y) / 2 + " " + b.x + "," + (a.y + b.y) / 2 + " " + b.x + "," + b.y;
     const cut = (t, n) => (t.length > n ? t.slice(0, n - 1) + "…" : t);
     return h("svg", { class: "graph lmap", viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": "The knowledge graph by level" },
@@ -243,21 +273,121 @@
         b.rows.map((r) => h("text", { x: X0 + 6, y: b.y + 30 + r.row * ROW, class: "lrow" }, cut(words(r.type), 18))),
         b.rest ? h("text", { x: X0 + 6, y: b.y + b.hgt - 7, class: "lsub" }, "The " + b.heads + " best connected of " + b.lv.heads.toLocaleString() + " at the head of this level. Search for any other.") : null,
         !b.nodes.length ? h("text", { x: X0 + 12, y: b.y + 41, class: "lsub" }, b.lv.entities ? "Closed. Click the box to open it." : "Nothing at this level yet." + (b.lv.id === "customer" ? " It fills as cases are assessed." : "")) : null)),
-      m.links.filter((l) => pos[l.s] && pos[l.o]).map((l) => { const tree = m.nodes.some((n) => (n.id === l.s && n.from === l.o) || (n.id === l.o && n.from === l.s)), hot = l.s === sel || l.o === sel;
-        return h("path", { d: curve(pos[l.s], pos[l.o]), fill: "none", stroke: hot ? "#ee6c2b" : "#9aa3b2", "stroke-width": hot ? 1.6 : 1, opacity: hot ? 0.95 : tree ? 0.5 : 0.13, "stroke-dasharray": tree || hot ? "" : "3 3" }, h("title", null, words(l.p))); }),
-      m.nodes.map((n) => h("g", { class: "nd" + (n.id === sel ? " sel" : ""), transform: "translate(" + pos[n.id].x + "," + pos[n.id].y + ")", onclick: drill(n) },
-        h("rect", { x: -11, y: -13, width: COL - 6, height: 30, rx: 6, fill: "#fff", opacity: n.id === sel ? 0.95 : 0.001 }),
-        n.drilled ? h("circle", { r: 10.5, fill: "none", stroke: LCOL[n.level], "stroke-width": 1.5 }) : null,
-        h("circle", { r: 6.5, fill: KCOL[n.type] || LCOL[n.level], stroke: "#fff", "stroke-width": 1.5, opacity: sel && !near.has(n.id) && n.id !== sel ? 0.5 : 1, "stroke-dasharray": n.stub ? "2 2" : "" }),
-        h("text", { x: 14, y: n.below || n.more ? 1 : 4 }, cut(n.name, 22)), n.more ? h("text", { x: 14, y: 13, class: "plus" }, n.more + " more below, not shown") : n.below ? h("text", { x: 14, y: 13, class: "plus" }, n.drilled ? "− " + n.below + " shown below" : "+ " + n.below + " below") : null,
+      m.links.filter((l) => pos[l.s] && pos[l.o]).map((l) => { const tree = shown.some((n) => (n.id === l.s && n.from === l.o) || (n.id === l.o && n.from === l.s)), hot = l.s === sel || l.o === sel;
+        if (!tree && !hot && shown.length > 60) return null;   // a full map shows what hangs under what, and every link of the node that is open
+        return h("path", { d: curve(pos[l.s], pos[l.o]), fill: "none", stroke: hot ? "#ee6c2b" : "#9aa3b2", "stroke-width": hot ? 1.6 : 1, opacity: hot ? 0.95 : tree ? (shown.length > 60 ? 0.3 : 0.5) : 0.13, "stroke-dasharray": tree || hot ? "" : "3 3" }, h("title", null, words(l.p))); }),
+      trail.slice(1).map((id, i) => (pos[trail[i]] && pos[id] ? h("path", { class: "ltrail", d: curve(pos[trail[i]], pos[id]) }, h("title", null, "The way down to " + S.k.e.entity.name)) : null)),
+      shown.map((n) => h("g", { class: "nd" + (n.id === sel ? " sel" : onTrail.has(n.id) ? " way" : ""), transform: "translate(" + pos[n.id].x + "," + pos[n.id].y + ")", onclick: drill(n) },
+        h("rect", { x: -11, y: -13, width: COL - 6, height: 30, rx: 6, fill: n.id === sel ? "#fdf1e9" : "#fff", stroke: n.id === sel ? "#ee6c2b" : "none", opacity: n.id === sel ? 1 : 0.001 }),
+        n.drilled || onTrail.has(n.id) ? h("circle", { r: 10.5, fill: "none", stroke: onTrail.has(n.id) ? "#ee6c2b" : LCOL[n.level], "stroke-width": onTrail.has(n.id) ? 2 : 1.5 }) : null,
+        h("circle", { r: 6.5, fill: KCOL[n.type] || LCOL[n.level], stroke: "#fff", "stroke-width": 1.5, opacity: sel && !near.has(n.id) && n.id !== sel && !onTrail.has(n.id) ? 0.5 : 1, "stroke-dasharray": n.stub ? "2 2" : "" }),
+        h("text", { x: 14, y: n.below || n.more ? 1 : 4 }, cut(kShort(n.name), 22)), n.more ? h("text", { x: 14, y: 13, class: "plus" }, n.more + " more below, not shown") : n.below ? h("text", { x: 14, y: 13, class: "plus" }, n.drilled ? "− " + n.below + " shown below" : "+ " + n.below + " below") : null,
         h("title", null, words(n.type) + ": " + n.name + (n.below ? " · " + n.below + " below it" : "")))));
   }
+  const KSKIP = ["description", "graphLevel", "knowledgeLevel", "knowledgeSpace", "knowledgeSpaceId", "graphLevelIn", "citation", "jurisdiction", "title", "reference", "rationale", "status"];
+  async function addUnder(e) {   // a fact by hand hangs under the node that is open, by a link the ontology has for the two kinds
+    const v = await form("Add under " + e.entity.name, [{ k: "what", label: "What it is", options: e.attach.map((o, i) => [String(i), o.label]) }, { k: "name", label: "Name, as it should read in the graph" },
+      { k: "description", label: "What it says", type: "textarea" }, { k: "source", label: "Where it is stated (a document and section, or a link)" }], "Add to the knowledge graph");
+    if (!v) return;
+    if (!v.name.trim()) { toast("Give it a name."); return; }
+    const o = e.attach[+v.what], out = await api("knowledge/facts", { type: o.type, name: v.name, description: v.description, source: v.source, links: [{ to: e.entity.id, relation: o.relation, direction: o.direction }] });
+    toast("Added by hand: " + out.fact.name); S.k.ov = await api("knowledge"); await kOpen(out.fact.entity);
+  }
+  function copyLink(id) {
+    const url = kLink(id), done = () => toast("Link to this node copied");
+    const old = () => { const t = h("textarea", { style: "position:fixed;opacity:0" }, url); document.body.appendChild(t); t.select(); try { document.execCommand("copy"); done(); } catch (err) { toast(url); } t.remove(); };
+    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(url).then(done, old); else old();
+  }
+  function kPanel() {
+    const ov = S.k.ov, e = S.k.e, p = e.entity.props, net = S.k.view === "network", goTo = net ? kEntity : kShow, levelName = Object.fromEntries(ov.levels.map((l) => [l.id, l.name]));
+    const REL = Object.fromEntries(ov.relationships.map((r) => [r.name, r])), u = e.usage, first = e.trail[0];
+    const groups = {}; e.links.forEach((l) => { const k = l.direction + ":" + l.predicate; (groups[k] = groups[k] || []).push(l); });
+    const linkLabel = (dir, pred) => (dir === "out" ? words(pred) : (REL[pred] || {}).inverse && REL[pred].inverse !== pred ? words(REL[pred].inverse) : words(pred) + " (to this)");
+    const lists = Object.entries(p).filter(([k, v]) => Array.isArray(v) && v.length > 1 && !KSKIP.includes(k));
+    const cite = [p.title, p.citation, p.reference && !String(p.citation || "").includes(p.reference) ? p.reference : null].filter(Boolean).join(" · ");
+    return h("div", { class: "card kpanel" },
+      h("nav", { class: "crumbs", "aria-label": "The way down to this node" }, h("span", { class: "lv", style: "color:" + (LCOL[first.level] || "#5d6779") }, (levelName[first.level] || "Added knowledge") + " level"),
+        e.trail.map((x, i) => [h("span", { class: "sep" }, "›"), i === e.trail.length - 1 ? h("b", null, kShort(x.name)) : h("button", { type: "button", title: words(x.type) + ": go to it", onclick: goTo(x.id) }, kShort(x.name))])),
+      h("div", { class: "row", style: "margin-top:8px;gap:6px" }, pill("plain", words(e.entity.type)), h("span", { class: "pill plain", style: "color:" + (LCOL[e.level] || "#5d6779") }, (levelName[e.level] || "Added knowledge") + " level" + ((e.also_at || []).length ? ", also " + e.also_at.map((x) => (levelName[x] || x).toLowerCase()).join(", ") : "")), pill(ORIGIN_PILL[e.origin] || "", ov.origin_words[e.origin] || e.origin),
+        p.status ? pill(p.status) : null),
+      h("p", { class: "kname" }, e.entity.name), p.description ? h("p", { class: "small" }, p.description) : null,
+      cite ? h("p", { class: "small", style: "margin-top:6px" }, h("b", null, "Cited as: "), cite) : null, p.jurisdiction ? h("p", { class: "small muted" }, p.jurisdiction) : null,
+      p.rationale ? h("p", { class: "small", style: "margin-top:6px" }, h("b", null, "Why: "), p.rationale) : null,
+      e.origin === "curated" ? h("p", { class: "knote" }, "A short summary written for this knowledge base, not the text of the source. Read the current text before relying on it.") : null,
+      e.class.definition ? h("p", { class: "small muted", style: "margin-top:6px" }, words(e.entity.type).replace(/^./, (c) => c.toUpperCase()) + ": " + e.class.definition) : null,
+      e.entity.synonyms.length ? h("div", { class: "chips", style: "margin-top:8px" }, h("span", { class: "small muted" }, "Also known as"), e.entity.synonyms.map((x) => h("span", { class: "chip" }, x))) : null,
+      lists.map(([k, v]) => [h("h3", { class: "kh" }, words(k).replace(/^./, (c) => c.toUpperCase())), steps(v)]),
+      kv(Object.entries(p).filter(([k, v]) => !KSKIP.includes(k) && v !== null && (typeof v !== "object" || (Array.isArray(v) && v.length < 2))).map(([k, v]) => [words(k), Array.isArray(v) ? v.join("; ") : String(v)])),
+      e.basis.length ? [h("h3", { class: "kh" }, e.rule ? "What its rule rests on" : "What this rule rests on"), e.rule ? h("button", { class: "lrowb", type: "button", onclick: goTo(e.rule.id) }, dot("PolicyRule"), h("span", null, "Rule: " + e.rule.name), h("em", null, "policy rule")) : null,
+        e.basis.map((b) => h("button", { class: "kbasis", type: "button", style: "border-left-color:" + (LCOL[b.level] || "#7a8496"), onclick: goTo(b.id) }, h("b", null, b.name), h("span", { class: "muted" }, " · " + (b.of ? b.of.name : words(b.type)) + (b.industries.length ? " · " + b.industries.join(", ") : "")), h("div", null, b.says)))] : null,
+      u.rules.length || u.findings ? [h("h3", { class: "kh" }, "Where it is used"),
+        u.rules.length ? [h("div", { class: "small muted", style: "margin-bottom:4px" }, u.rules.length + (u.rules.length === 1 ? " rule rests" : " rules rest") + " on it"), (S.k.more === "rules" ? u.rules : u.rules.slice(0, 5)).map((r) => h("button", { class: "lrowb", type: "button", onclick: goTo(r.id) }, dot(r.type, r.level), h("span", null, r.name), h("em", null, words(r.type)))),
+          u.rules.length > 5 ? h("button", { class: "btn sm ghost", onclick: () => { S.k.more = S.k.more === "rules" ? null : "rules"; render(); } }, S.k.more === "rules" ? "Show fewer" : "Show all " + u.rules.length) : null] : null,
+        u.findings ? [h("div", { class: "row", style: "margin:8px 0 4px;gap:6px" }, h("span", { class: "small muted" }, u.findings + (u.findings === 1 ? " finding" : " findings") + " on " + u.cases.length + (u.cases.length === 1 ? " case" : " cases")), statusPills(u.by_status)),
+          u.cases.slice(0, 6).map((c) => h("div", { class: "kcase" }, h("button", { class: "btn sm ghost mono", type: "button", title: "Open the case", onclick: run(() => open(c.name, "provenance")) }, c.name),
+            c.findings.slice(0, 8).map((f) => h("button", { class: "pill " + f.status, type: "button", title: f.name + ": go to this finding in the graph", onclick: goTo(f.id) }, f.status)), c.findings.length > 8 ? h("span", { class: "small muted" }, "+" + (c.findings.length - 8)) : null)),
+          u.cases.length > 6 ? h("p", { class: "small muted" }, "and " + (u.cases.length - 6) + " more case(s)") : null] : null] : null,
+      h("h3", { class: "kh" }, "Linked to (" + e.links.length + ")"),
+      Object.entries(groups).sort((a, b) => a[0].split(":")[1].localeCompare(b[0].split(":")[1])).map(([k, ls]) => { const [dir, pred] = k.split(":"), all = S.k.more === k;
+        return h("div", { class: "lgroup" }, h("div", { class: "lhead", title: (REL[pred] || {}).definition || "" }, linkLabel(dir, pred), h("span", { class: "muted" }, " · " + ls.length)),
+          (all ? ls : ls.slice(0, 5)).map((l) => h("button", { class: "lrowb", type: "button", onclick: goTo(l.other) }, dot(l.other_type, l.other_level), h("span", null, l.other_name), h("em", null, words(l.other_type)))),
+          ls.length > 5 ? h("button", { class: "btn sm ghost", onclick: () => { S.k.more = all ? null : k; render(); } }, all ? "Show fewer" : "Show all " + ls.length) : null); }),
+      h("h3", { class: "kh" }, "Where this came from"), e.support.length ? e.support.slice(0, 4).map((c) => h("div", { class: "src", style: "margin-bottom:4px;cursor:default" }, h("div", { class: "row" }, h("b", null, c.fileName || c.source || c.system || c.app || c.kind), h("span", { class: "muted" }, [c.locator, c.case].filter(Boolean).join(" · ")),
+        c.check ? h("span", { class: "right" }, pill({ named: "pass", quoted: "pass", read: "pass", paraphrased: "review", missing: "fail" }[c.check] || "", c.check)) : null), c.quote ? h("q", null, c.quote) : h("span", { class: "muted" }, c.text || ""))) : h("p", { class: "small muted" }, "No source recorded."),
+      e.support.length > 4 ? h("p", { class: "small muted" }, "and " + (e.support.length - 4) + " more") : null,
+      h("div", { class: "row", style: "margin-top:12px;gap:6px" }, h("button", { class: "btn sm", onclick: () => copyLink(e.entity.id) }, "Copy the link to this node"),
+        net ? h("button", { class: "btn sm", onclick: kShow(e.entity.id) }, "Show it on the level map") : h("button", { class: "btn sm", onclick: run(async () => { S.k.view = "network"; S.k.g = await api("knowledge/graph?focus=" + encodeURIComponent(e.entity.id)); render(); }) }, "Show its links as a network"),
+        e.attach.length ? h("button", { class: "btn sm", onclick: run(() => addUnder(e)) }, "Add under this") : null,
+        e.by_hand ? h("button", { class: "btn sm", onclick: run(async () => { await api("knowledge/facts/" + encodeURIComponent(e.by_hand) + "/remove", {}); toast("Taken out: " + e.entity.name); const up = e.trail.length > 1 ? e.trail[e.trail.length - 2].id : null; S.k.ov = await api("knowledge"); if (up) await kOpen(up).catch(() => kReload()); else await kReload(); }) }, "Take out what was added by hand") : null));
+  }
+  const STATES = { standards: ["standard or regulation", "standards and regulations"], provisions: ["provision", "provisions"], bodies: ["standards body", "standards bodies"], practices: ["practice", "practices"], processes: ["process", "processes"], risks: ["risk", "risks"],
+    kpis: ["measure", "measures"], terms: ["term", "terms"], challenges: ["challenge", "challenges"], capabilities: ["capability", "capabilities"] };
+  function kManage() {   // everything behind the graph, as one list to manage
+    const ov = S.k.ov, ver = ov.verification || {}, st = ver.stats || {}, levelName = Object.fromEntries(ov.levels.map((l) => [l.id, l.name]));
+    const origins = Object.entries((ver.origins || {}).entities || {}).sort((a, b) => b[1] - a[1]), total = origins.reduce((t, x) => t + x[1], 0) || 1;
+    const states = (b) => Object.keys(STATES).filter((k) => (b.states || {})[k]).map((k) => b.states[k] + " " + STATES[k][b.states[k] === 1 ? 0 : 1]).join(" · ");
+    const sw = (b) => run(async () => { await api("knowledge/bases/" + encodeURIComponent(b.id), { on: !b.on }); toast(b.name + (b.on ? " is switched off: nothing it states is in the graph now." : " is switched on.")); await kReload(); });
+    const lvPill = (id) => h("span", { class: "pill plain", style: "color:" + (LCOL[id] || "#5d6779") }, levelName[id] || "Each at its own");
+    const fileIn = h("input", { type: "file", accept: ".zip,.json,.html,.htm", style: "display:none", onchange: run(async (ev) => { const f = ev.target.files[0]; if (!f) return;
+      const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1]); r.onerror = rej; r.readAsDataURL(f); });
+      const out = await api("knowledge/imports", { name: f.name, content_base64: b64, level: S.k.place }); toast("Added " + out.import.label + ": " + out.import.entities + " entities, " + out.import.relationships + " relationships, " + (levelName[out.import.placed] ? "at the " + levelName[out.import.placed] + " level" : out.import.own_levels ? "each entity at the level it was built for" : "with no level yet: choose one for it in the list")); await kReload(); }) });
+    const download = run(async () => { const res = await fetch(BASE + "/api/knowledge/export", { headers: token() ? { Authorization: "Bearer " + token() } : {} }); if (!res.ok) throw new Error("The export failed (" + res.status + ")");
+      const url = URL.createObjectURL(await res.blob()), a = h("a", { href: url, download: "docuinsights-knowledge-base.zip" }); document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 2000); });
+    const bases = ov.knowledge_bases, curated = bases.filter((b) => b.kind === "curated"), added = bases.filter((b) => b.kind === "added");
+    const cell = (b, sub) => h("td", null, h("b", null, b), sub ? h("div", { class: "small muted" }, sub) : null);
+    return [h("div", { class: "card" }, h("h3", null, "Knowledge bases"),
+        h("p", { class: "small muted", style: "margin-bottom:8px" }, "Everything the graph is built from. Switch a curated knowledge base off and nothing it states is in the graph; switch it on and it is back. Each one is a file you can read and edit, kept in the " + ov.format.name + " layout (schema " + ov.format.schemaVersion + ") once built."),
+        h("table", { class: "kbases" }, h("thead", null, h("tr", null, ["Knowledge base", "Level", "What it states", "In the graph", ""].map((x) => h("th", null, x)))), h("tbody", null,
+          curated.map((b) => h("tr", { class: b.on ? "" : "off" }, cell(b.name, "Curated · v" + b.version + (b.shipped ? " · comes with the accelerator" : " · from this installation's knowledge folder")), h("td", null, lvPill(b.level)), h("td", { class: "small" }, states(b)),
+            h("td", { class: "small" }, b.on ? b.entities.toLocaleString() + " things, " + b.relationships.toLocaleString() + " links" : h("span", { class: "muted" }, "switched off")),
+            h("td", { class: "acts" }, b.on ? h("button", { class: "btn sm", onclick: kShow(b.head_id) }, "Open") : null, h("button", { class: "btn sm" + (b.on ? " ghost" : " primary"), onclick: sw(b) }, b.on ? "Switch off" : "Switch on")))),
+          h("tr", null, cell("The accelerator and its use cases", "Built in · " + S.cfg.profiles.length + " use case(s), their documents and rules, " + S.cfg.agents.length + " agents under contract"), h("td", null, lvPill("domain"), " ", lvPill("solution")), h("td", { class: "small" }, "Declared by the use-case profiles and the agent contracts"), h("td", { class: "small muted" }, "always on"), h("td", null)),
+          h("tr", null, cell("Cases", "Learned · it grows with every case that is assessed"), h("td", null, lvPill("customer")), h("td", { class: "small" }, ov.sources.cases + " assessed case(s), " + ov.sources.documents + " document(s)"), h("td", { class: "small muted" }, "always on"), h("td", null)),
+          added.map((b) => h("tr", { class: b.on ? "" : "off" }, cell(b.name, "Added · " + (b.app || "file") + (b.at ? " · " + when(b.at) : "")),
+            h("td", null, b.on ? h("select", { style: "width:auto", "aria-label": "Level of " + b.name, onchange: run(async (ev) => { await api("knowledge/imports/" + encodeURIComponent(b.id) + "/place", { level: ev.target.value }); toast(b.name + " moved."); await kReload(); }) }, [["", b.own_levels ? "Each at its own level" : "No level yet"], ["industry", "Industry"], ["domain", "Domain"], ["solution", "Solution"], ["customer", "Customer"]].map(([v, l]) => h("option", { value: v, selected: (b.level || "") === v }, l))) : lvPill(b.level)),
+            h("td", { class: "small" }, "A knowledge base built elsewhere, in KB Forge's format"), h("td", { class: "small" }, b.on ? b.entities.toLocaleString() + " things, " + b.relationships.toLocaleString() + " links" : h("span", { class: "muted" }, "taken out")),
+            h("td", { class: "acts" }, h("button", { class: "btn sm" + (b.on ? " ghost" : " primary"), onclick: run(async () => { await api("knowledge/imports/" + encodeURIComponent(b.id) + (b.on ? "/remove" : "/restore"), {}); toast(b.name + (b.on ? " taken out. It can be put back." : " put back.")); await kReload(); }) }, b.on ? "Take out" : "Put back")))))),
+        (ov.index.knowledge_problems || []).length ? h("div", { class: "knote", style: "margin-top:10px" }, h("b", null, "Left out when the graph was last built: "), h("ul", { style: "margin:4px 0 0;padding-left:18px" }, ov.index.knowledge_problems.map((x) => h("li", null, x)))) : null,
+        fileIn, h("div", { class: "row", style: "margin-top:12px" }, h("select", { style: "width:auto", "aria-label": "Level for a knowledge base you add", onchange: (ev) => (S.k.place = ev.target.value) }, [["", "Level: as built"], ["industry", "Industry"], ["domain", "Domain"], ["solution", "Solution"], ["customer", "Customer"]].map(([v, l]) => h("option", { value: v, selected: S.k.place === v }, l))),
+          h("button", { class: "btn primary sm", onclick: () => fileIn.click() }, "Add a knowledge base"), h("button", { class: "btn sm", onclick: download }, "Download for KB Forge (.zip)"),
+          h("button", { class: "btn sm", onclick: run(async () => { await api("knowledge/rebuild", {}); toast("The graph was built again from its knowledge bases."); await kReload(); }) }, "Build the graph again"))),
+      h("div", { class: "grid g2", style: "margin-top:14px;align-items:start" },
+        cardOf("Added by hand", h("p", { class: "small muted", style: "margin-bottom:8px" }, "To add something, open the node it belongs under on the level map and choose “Add under this”: an article under its standard, a control under its industry, what a rule rests on under the rule. It is marked as added by hand, with who added it and what they cite."),
+          ov.facts.length ? ov.facts.map((f) => h("div", { class: "kcase" }, h("button", { class: "lrowb", type: "button", style: "flex:1", onclick: kShow(f.entity) }, dot(f.type), h("span", null, f.name), h("em", null, words(f.type) + " · " + f.by + " · " + when(f.at))),
+            h("button", { class: "btn sm ghost", onclick: run(async () => { await api("knowledge/facts/" + encodeURIComponent(f.id) + "/remove", {}); toast("Taken out: " + f.name); await kReload(); }) }, "Take out"))) : h("p", { class: "small muted" }, "Nothing has been added by hand.")),
+        cardOf("Where the knowledge comes from", h("p", { class: "small muted", style: "margin-bottom:8px" }, "Every build checks each document citation against the text it cites, with no model. " + (st.missing ? st.missing + " could not be found." : "None is missing.")),
+          origins.map(([o, n]) => h("div", { class: "barrow" }, h("span", null, ov.origin_words[o] || o), h("div", { class: "bar" }, h("i", { style: "width:" + Math.max(2, (100 * n) / total) + "%" })), h("b", null, n))))),
+      h("details", { class: "card", style: "margin-top:14px" }, h("summary", null, "The ontology: " + ov.classes.length + " kinds of thing, " + ov.relationships.length + " kinds of link"),
+        h("table", { style: "margin-top:8px" }, h("thead", null, h("tr", null, ["Kind of thing", "Is a", "Level", "In the graph", "What counts as one"].map((x) => h("th", null, x)))), h("tbody", null, ov.classes.filter((c) => c.count || c.source !== "import").map((c) => h("tr", null, h("td", null, h("b", null, c.name)), h("td", { class: "small" }, c.parent || "–"), h("td", { class: "small" }, levelName[c.level] || "–"), h("td", { class: "mono small" }, c.count), h("td", { class: "small muted" }, c.definition))))),
+        h("table", { style: "margin-top:14px" }, h("thead", null, h("tr", null, ["Kind of link", "From", "To", "In the graph", "Meaning"].map((x) => h("th", null, x)))), h("tbody", null, ov.relationships.filter((r) => r.count).map((r) => h("tr", null, h("td", null, h("b", null, r.name)), h("td", { class: "small" }, r.domain), h("td", { class: "small" }, r.range), h("td", { class: "mono small" }, r.count), h("td", { class: "small muted" }, r.definition))))))];
+  }
   function knowledge() {
-    const ov = S.k.ov, e = S.k.e, idx = ov.index, ver = ov.verification || {}, st = ver.stats || {}, W = 1100, H = 600, map = S.k.view === "map", g = S.k.g;
+    const ov = S.k.ov, e = S.k.e, idx = ov.index, ver = ov.verification || {}, st = ver.stats || {}, W = 1100, H = 600, map = S.k.view === "map", manage = S.k.view === "manage", g = S.k.g;
     const checked = (st.checked_entities || 0) + (st.checked_relationships || 0), found = checked - (st.missing || 0) - (st.unchecked || 0), levelName = Object.fromEntries(ov.levels.map((l) => [l.id, l.name]));
-    let svg;
+    const curated = ov.knowledge_bases.filter((b) => b.kind === "curated" && b.on), goTo = map ? kShow : kEntity;
+    let svg = null;
     if (map) svg = levelMap();
-    else {
+    else if (!manage) {
       const key = g.nodes.length + ":" + g.links.length + ":" + (g.focus || "") + ":" + S.k.levels.join("");
       if (key !== kKey) { kPos = spread(g.nodes, g.links, W, H); kKey = key; }
       const sel = e ? e.entity.id : g.focus, near = new Set(g.links.filter((l) => l.s === sel || l.o === sel).flatMap((l) => [l.s, l.o]));
@@ -267,50 +397,28 @@
           h("circle", { r: n.type === "UseCase" ? 10 : Math.min(9, 4.5 + Math.sqrt(n.degree)), fill: KCOL[n.type] || LCOL[n.level] || "#7a8496", stroke: "#fff", "stroke-width": 1.5, opacity: sel && !near.has(n.id) && n.id !== sel ? 0.45 : 1 }),
           g.nodes.length < 70 || n.type === "UseCase" || n.degree > 9 || n.id === sel || near.has(n.id) ? h("text", { x: 11, y: 4 }, n.name.length > 30 ? n.name.slice(0, 29) + "…" : n.name) : null, h("title", null, n.type + ": " + n.name))));
     }
-    const origins = Object.entries((ver.origins || {}).entities || {}).sort((a, b) => b[1] - a[1]), total = origins.reduce((t, x) => t + x[1], 0) || 1;
-    const fileIn = h("input", { type: "file", accept: ".zip,.json,.html,.htm", style: "display:none", onchange: run(async (ev) => { const f = ev.target.files[0]; if (!f) return;
-      const b64 = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1]); r.onerror = rej; r.readAsDataURL(f); });
-      const out = await api("knowledge/imports", { name: f.name, content_base64: b64, level: S.k.place }); toast("Added " + out.import.label + ": " + out.import.entities + " entities, " + out.import.relationships + " relationships, " + (levelName[out.import.placed] ? "at the " + levelName[out.import.placed] + " level" : out.import.own_levels ? "each entity at the level it was built for" : "with no level yet: choose one and add it again")); top("knowledge")(); }) });
-    const download = run(async () => { const res = await fetch(BASE + "/api/knowledge/export", { headers: token() ? { Authorization: "Bearer " + token() } : {} }); if (!res.ok) throw new Error("The export failed (" + res.status + ")");
-      const url = URL.createObjectURL(await res.blob()), a = h("a", { href: url, download: "docuinsights-knowledge-base.zip" }); document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 2000); });
-    const panel = e ? cardOf(null, h("div", { class: "row" }, pill("plain", words(e.entity.type)), h("span", { class: "pill plain", style: "color:" + (LCOL[e.level] || "#5d6779") }, (levelName[e.level] || "Added knowledge") + " level" + ((e.also_at || []).length ? ", also " + e.also_at.map((x) => (levelName[x] || x).toLowerCase()).join(", ") : "")), pill(ORIGIN_PILL[e.origin] || "", ov.origin_words[e.origin] || e.origin)),
-        h("p", { style: "font-weight:650;font-size:15px;margin:8px 0 4px;overflow-wrap:anywhere" }, e.entity.name), e.entity.props.description ? h("p", { class: "small" }, e.entity.props.description) : null,
-        e.class.definition ? h("p", { class: "small muted", style: "margin-top:4px" }, words(e.entity.type).replace(/^./, (c) => c.toUpperCase()) + ": " + e.class.definition) : null,
-        e.entity.synonyms.length ? h("div", { class: "chips", style: "margin-top:8px" }, h("span", { class: "small muted" }, "Also known as"), e.entity.synonyms.map((x) => h("span", { class: "chip" }, x))) : null,
-        kv(Object.entries(e.entity.props).filter(([k, v]) => !["description", "graphLevel", "knowledgeLevel", "knowledgeSpace", "knowledgeSpaceId", "graphLevelIn"].includes(k) && v !== null && (typeof v !== "object" || Array.isArray(v))).map(([k, v]) => [words(k), Array.isArray(v) ? v.join("; ") : String(v)])),
-        h("h3", { style: "margin-top:12px" }, "Where this came from"), e.support.length ? e.support.slice(0, 4).map((c) => h("div", { class: "src", style: "margin-bottom:4px;cursor:default" }, h("div", { class: "row" }, h("b", null, c.fileName || c.source || c.system || c.app || c.kind), h("span", { class: "muted" }, [c.locator, c.case].filter(Boolean).join(" · ")),
-          c.check ? h("span", { class: "right" }, pill({ named: "pass", quoted: "pass", read: "pass", paraphrased: "review", missing: "fail" }[c.check] || "", c.check)) : null), c.quote ? h("q", null, c.quote) : h("span", { class: "muted" }, c.text || ""))) : h("p", { class: "small muted" }, "No source recorded."),
-        e.support.length > 4 ? h("p", { class: "small muted" }, "and " + (e.support.length - 4) + " more") : null,
-        h("h3", { style: "margin-top:12px" }, "Links (" + e.links.length + ")"), e.links.slice(0, 14).map((l) => h("div", { class: "src", style: "margin-bottom:4px", onclick: kEntity(l.other) }, h("span", { class: "muted" }, l.direction === "out" ? words(l.predicate) + " → " : "← " + words(l.predicate) + " "), l.other_name)),
-        e.links.length > 14 ? h("p", { class: "small muted" }, "and " + (e.links.length - 14) + " more") : null,
-        h("div", { class: "row", style: "margin-top:10px" }, h("button", { class: "btn sm", onclick: run(async () => { S.k.view = "network"; S.k.g = await api("knowledge/graph?focus=" + encodeURIComponent(e.entity.id)); render(); }) }, "Show this and its links as a network")))
-      : cardOf("How to read it", h("p", { class: "small" }, "Four levels, top to bottom, as KB Forge lays knowledge out: the industries, what each use case asks for, the accelerator's agents, and the workspace with its cases."),
-          h("p", { class: "small muted", style: "margin-top:6px" }, "Click a dot to open what is below it and to see what it is and where it came from. Click it again to close it. Click a level's box to open or close the level."),
-          ov.known.length ? [h("h3", { style: "margin-top:12px" }, "Met most often"), ov.known.map((x) => h("div", { class: "src", style: "margin-bottom:4px", onclick: kEntity(x.id) }, x.name, h("span", { class: "muted" }, " · " + x.cases + " case(s)")))] : null);
+    const kinds = {}; (map ? S.k.m.nodes : manage ? [] : g.nodes).forEach((n) => (kinds[n.type] = (kinds[n.type] || 0) + 1));
+    const hide = S.k.hide || [], legend = Object.keys(kinds).sort().map((t) => (map
+      ? h("button", { class: "lg" + (hide.includes(t) ? " off" : ""), type: "button", "aria-pressed": String(!hide.includes(t)), title: hide.includes(t) ? "Show this kind on the map" : "Hide this kind on the map", onclick: () => { S.k.hide = hide.includes(t) ? hide.filter((x) => x !== t) : [...hide, t]; render(); } }, dot(t), words(t), h("span", { class: "muted" }, kinds[t]))
+      : h("span", { class: "lg" }, dot(t), words(t))));
+    const panel = e ? kPanel() : cardOf("How to read it", h("p", { class: "small" }, "Four levels, top to bottom, as KB Forge lays knowledge out: what each industry works under, what the domain and each use case ask for, the accelerator's agents, and the workspace with its cases."),
+      h("p", { class: "small muted", style: "margin-top:6px" }, "Click a dot to open what is below it and to see what it is, what rests on it and where it came from. Every node has a link of its own: open that link and the map opens along the way down to the node."),
+      curated.length ? [h("h3", { class: "kh" }, "Start from a knowledge base"), curated.map((b) => h("button", { class: "lrowb", type: "button", onclick: kShow(b.head_id) }, h("i", { class: "kdot", style: "background:" + LCOL[b.level] }), h("span", null, b.head), h("em", null, b.entities + " things")))] : null,
+      ov.known.length ? [h("h3", { class: "kh" }, "Met most often"), ov.known.map((x) => h("button", { class: "lrowb", type: "button", onclick: goTo(x.id) }, dot(x.type), h("span", null, x.name), h("em", null, x.cases + " case(s)")))] : null);
     const seg = (id, label) => h("button", { "aria-pressed": String(S.k.view === id), onclick: run(async () => { S.k.view = id; if (id === "network" && !S.k.g) S.k.g = await api("knowledge/graph?levels=" + S.k.levels.join(",")); render(); }) }, label);
-    return [section("Knowledge", "Everything this workspace has learned, as one graph in KB Forge's format: four levels, from the industry down to each case. It grows with every case that is assessed and every knowledge base you add, and each thing in it points to where it came from."),
+    return [section("Knowledge", "Everything this workspace knows, as one graph in KB Forge's format: four levels, from the industry down to each case. Every finding can be followed to the rule it applied and from the rule to the article, control or term it rests on. Each node has a link of its own and says where it came from."),
       h("div", { class: "grid g4", style: "margin-bottom:14px" }, [[idx.entities.toLocaleString(), "things known"], [idx.triples.toLocaleString(), "links between them"], [ov.quality.score, "quality score, out of 100"], [checked ? Math.round((100 * found) / checked) + "%" : "–", "of " + checked + " citations found in the text"]].map(([v, l]) => h("div", { class: "tile" }, h("b", null, v), h("span", null, l)))),
-      h("div", { class: "row", style: "margin-bottom:10px" }, h("div", { class: "seg" }, seg("map", "Level map"), seg("network", "Network")),
-        map ? [h("button", { class: "btn sm", onclick: () => { S.k.touched = true; S.k.open = ov.levels.map((l) => l.id); S.k.drill = []; S.k.e = null; kMap()(); } }, "Back to the four levels"), S.k.drill.length ? h("span", { class: "small muted" }, S.k.drill.length + " opened") : null]
-          : [h("div", { class: "seg" }, ov.levels.map((lv) => h("button", { "aria-pressed": String(S.k.levels.includes(lv.id) && !g.focus), onclick: () => { S.k.levels = S.k.levels.includes(lv.id) ? S.k.levels.filter((x) => x !== lv.id) : [...S.k.levels, lv.id]; if (!S.k.levels.length) S.k.levels = [lv.id]; kGraph("levels=" + S.k.levels.join(","))(); } }, lv.name))),
+      h("div", { class: "row", style: "margin-bottom:10px" }, S.k.back ? h("button", { class: "btn sm", onclick: run(() => open(S.k.back)) }, "← Back to case " + S.k.back) : null,
+        h("div", { class: "seg" }, seg("map", "Level map"), seg("network", "Network"), seg("manage", "Manage")),
+        map ? [h("button", { class: "btn sm", onclick: () => { S.k.touched = true; S.k.open = ov.levels.map((l) => l.id); S.k.drill = []; S.k.e = null; S.k.hide = []; kHash(null); kMap()(); } }, "Back to the four levels"), S.k.drill.length ? h("span", { class: "small muted" }, S.k.drill.length + " opened") : null]
+          : manage ? null : [h("div", { class: "seg" }, ov.levels.map((lv) => h("button", { "aria-pressed": String(S.k.levels.includes(lv.id) && !g.focus), onclick: () => { S.k.levels = S.k.levels.includes(lv.id) ? S.k.levels.filter((x) => x !== lv.id) : [...S.k.levels, lv.id]; if (!S.k.levels.length) S.k.levels = [lv.id]; kGraph("levels=" + S.k.levels.join(","))(); } }, lv.name))),
             g.focus ? h("button", { class: "btn sm", onclick: kGraph("levels=" + S.k.levels.join(",")) }, "Back to the whole graph") : null],
-        h("form", { class: "row", style: "flex:1;min-width:260px;flex-wrap:nowrap", onsubmit: run(async (ev) => { S.k.hits = S.k.q.trim() ? await api("knowledge/search?q=" + encodeURIComponent(S.k.q)) : null; render(); }) }, h("input", { type: "text", placeholder: "Search a company, a product, a rule, a reference number…", value: S.k.q, oninput: (ev) => (S.k.q = ev.target.value) }), h("button", { class: "btn sm", type: "submit", style: "flex:none" }, "Search")),
-        !map ? h("span", { class: "small muted" }, g.shown + (g.shown < g.total ? " of " + g.total.toLocaleString() + " (the best connected)" : "") + " shown · " + g.links.length + " links") : null),
-      S.k.hits ? cardOf(S.k.hits.length ? "Found" : "Nothing found", S.k.hits.map((x) => h("div", { class: "src", style: "margin-bottom:4px", onclick: kEntity(x.id) }, h("b", null, x.name), h("span", { class: "muted" }, " · " + words(x.type) + (x.cases ? " · " + x.cases + " case(s)" : "")), x.description ? h("div", { class: "muted" }, x.description) : null)), h("div", { style: "height:4px" })) : null,
-      h("div", { class: "split", style: "grid-template-columns:minmax(0,3fr) minmax(0,1.15fr);margin-top:10px" }, h("div", null, svg, h("div", { class: "chips small", style: "margin-top:8px" }, [...new Set((map ? S.k.m.nodes : g.nodes).map((n) => n.type))].map((t) => h("span", { class: "row", style: "gap:5px;margin-right:8px" }, h("span", { style: "width:10px;height:10px;border-radius:50%;display:inline-block;background:" + (KCOL[t] || "#7a8496") }), words(t))))), panel),
-      h("div", { class: "grid g2", style: "margin-top:14px" },
-        cardOf("Where the knowledge comes from", h("p", { class: "small muted", style: "margin-bottom:8px" }, "Every build checks each document citation against the text it cites, with no model. " + (st.missing ? st.missing + " could not be found." : "None is missing.")),
-          origins.map(([o, n]) => h("div", { class: "barrow" }, h("span", null, ov.origin_words[o] || o), h("div", { class: "bar" }, h("i", { style: "width:" + Math.max(2, (100 * n) / total) + "%" })), h("b", null, n)))),
-        cardOf("Knowledge bases", h("p", { class: "small muted", style: "margin-bottom:8px" }, "Kept in the " + ov.format.name + " layout (schema " + ov.format.schemaVersion + "). Add a knowledge base built in KB Forge: it sits at the level it was built for (industry, domain, delivery experience, customer), or the one you choose. Download this one to open it in KB Forge."),
-          h("table", null, h("tbody", null, h("tr", null, h("td", null, h("b", null, "The accelerator and its use cases"), h("div", { class: "small muted" }, S.cfg.profiles.length + " use case(s), " + S.cfg.agents.length + " agents under contract")), h("td", { class: "small muted" }, "built in"), h("td", null)),
-            h("tr", null, h("td", null, h("b", null, "Cases"), h("div", { class: "small muted" }, ov.sources.cases + " assessed case(s), " + ov.sources.documents + " document(s)")), h("td", { class: "small muted" }, "learned"), h("td", null)),
-            ov.sources.imports.map((i) => h("tr", null, h("td", null, h("b", null, i.label), h("div", { class: "small muted" }, i.entities.toLocaleString() + " entities, " + i.relationships.toLocaleString() + " relationships · " + (i.app || "file") + " · " + when(i.imported_at))), h("td", { class: "small" }, i.level_name),
-              h("td", null, h("button", { class: "btn sm ghost", onclick: run(async () => { await api("knowledge/imports/" + encodeURIComponent(i.id) + "/remove", {}); top("knowledge")(); }) }, "Take out")))))),
-          fileIn, h("div", { class: "row", style: "margin-top:10px" }, h("select", { style: "width:auto", "aria-label": "Level", onchange: (ev) => (S.k.place = ev.target.value) }, [["", "Level: as built"], ["industry", "Industry"], ["domain", "Domain"], ["solution", "Solution"], ["customer", "Customer"]].map(([v, l]) => h("option", { value: v, selected: S.k.place === v }, l))),
-            h("button", { class: "btn primary sm", onclick: () => fileIn.click() }, "Add a knowledge base"), h("button", { class: "btn sm", onclick: download }, "Download for KB Forge (.zip)")))),
-      h("details", { class: "card", style: "margin-top:14px" }, h("summary", null, "The ontology: " + ov.classes.length + " kinds of thing, " + ov.relationships.length + " kinds of link"),
-        h("table", { style: "margin-top:8px" }, h("thead", null, h("tr", null, ["Kind of thing", "Is a", "Level", "In the graph", "What counts as one"].map((x) => h("th", null, x)))), h("tbody", null, ov.classes.filter((c) => c.count || c.source !== "import").map((c) => h("tr", null, h("td", null, h("b", null, c.name)), h("td", { class: "small" }, c.parent || "–"), h("td", { class: "small" }, levelName[c.level] || "–"), h("td", { class: "mono small" }, c.count), h("td", { class: "small muted" }, c.definition))))),
-        h("table", { style: "margin-top:14px" }, h("thead", null, h("tr", null, ["Kind of link", "From", "To", "In the graph", "Meaning"].map((x) => h("th", null, x)))), h("tbody", null, ov.relationships.filter((r) => r.count).map((r) => h("tr", null, h("td", null, h("b", null, r.name)), h("td", { class: "small" }, r.domain), h("td", { class: "small" }, r.range), h("td", { class: "mono small" }, r.count), h("td", { class: "small muted" }, r.definition))))))];
+        manage ? null : h("form", { class: "row", style: "flex:1;min-width:260px;flex-wrap:nowrap", onsubmit: run(async () => { S.k.hits = S.k.q.trim() ? await api("knowledge/search?q=" + encodeURIComponent(S.k.q)) : null; render(); }) }, h("input", { type: "text", placeholder: "Search a standard, an article, a rule, a company, a reference number…", "aria-label": "Search the knowledge graph", value: S.k.q, oninput: (ev) => (S.k.q = ev.target.value) }), h("button", { class: "btn sm", type: "submit", style: "flex:none" }, "Search")),
+        !map && !manage ? h("span", { class: "small muted" }, g.shown + (g.shown < g.total ? " of " + g.total.toLocaleString() + " (the best connected)" : "") + " shown · " + g.links.length + " links") : null),
+      manage ? kManage() : [
+        S.k.hits ? cardOf(S.k.hits.length ? "Found: click one to go to it" : "Nothing found", S.k.hits.map((x) => h("button", { class: "lrowb", type: "button", onclick: goTo(x.id) }, dot(x.type, x.level), h("span", null, h("b", null, x.name), x.description ? h("span", { class: "muted" }, " · " + x.description) : null), h("em", null, words(x.type) + " · " + (LVL[x.level] || "added").toLowerCase() + (x.cases ? " · " + x.cases + " case(s)" : "")))),
+          h("button", { class: "btn sm ghost", style: "margin-top:4px", onclick: () => { S.k.hits = null; render(); } }, "Close")) : null,
+        h("div", { class: "split ksplit", style: "margin-top:10px" }, h("div", null, svg, h("div", { class: "legend" }, map ? h("span", { class: "small muted" }, "Kinds on the map (click to hide):") : null, legend)), panel)]];
   }
 
   // ---------------------------------------------------------------------------------------------- how it is governed
@@ -339,6 +447,29 @@
   }
 
   // ---------------------------------------------------------------------------------------------- findings
+  function caseK() {   // the case as the knowledge graph sees it: fetched once for each assessment, drawn when it arrives
+    const a = A(); if (!a) return null;
+    const key = S.c.reference + ":" + a.id;
+    if (!S.ck || S.ck.key !== key) { S.ck = { key, data: null }; api("cases/" + encodeURIComponent(S.c.reference) + "/knowledge").then((d) => { if (S.ck && S.ck.key === key) { S.ck.data = d; if (S.c) render(); } }).catch(() => { /* the graph is not built yet: the cards show without it */ }); }
+    return S.ck.data;
+  }
+  function knowledgeLine(f) {
+    const ck = caseK(), fk = ck ? ck.findings[f.id] : null, basis = f.basis && f.basis.length ? f.basis : fk ? fk.basis : [], met = fk ? fk.known : [];
+    if (!basis.length && !met.length && !(fk && (fk.rule || fk.node))) return null;
+    return h("div", { class: "kline" }, h("span", { class: "klabel", title: "What the knowledge graph holds behind this finding. Each opens the exact node, with the way down to it." }, "Knowledge graph"),
+      fk && fk.rule ? kchip(fk.rule, "Rule: " + fk.rule.name) : null, basis.length ? h("span", { class: "small muted" }, "rests on") : null, basis.map((b) => kchip(b, kShort(b.name), b.name + ". " + b.says)),
+      met.map((x) => kchip(x, x.name + " · in " + x.cases + " case(s)")), fk && fk.node ? h("button", { class: "btn sm ghost", type: "button", onclick: kShow(fk.node) }, "This finding in the graph") : null);
+  }
+  function graphCard() {
+    const ck = caseK(); if (!ck || (!ck.rests_on.length && !ck.known.length)) return null;
+    const count = (fs) => fs.reduce((t, f) => ((t[f.status] = (t[f.status] || 0) + 1), t), {}), lv = Object.entries(ck.handed || {}).filter((x) => x[1]);
+    return cardOf("What the knowledge graph says about this case", h("p", { class: "small muted", style: "margin-bottom:8px" }, "Every check applies a rule, and every rule rests on something the graph holds: an article of a standard, a control, a term. Open one to see it in the graph, with the way down to it and every other case it was used on."),
+      ck.rests_on.length ? h("table", null, h("thead", null, h("tr", null, ["The checks rest on", "Which part", "Checks on this case"].map((x) => h("th", null, x)))), h("tbody", null, ck.rests_on.slice(0, 10).map((r) => h("tr", null, h("td", null, kchip(r, r.name)),
+        h("td", { class: "small" }, r.points.length ? r.points.map((p) => kShort(p).replace(r.name + " ", "")).join(", ") : words(r.type)), h("td", null, h("span", { class: "row", style: "gap:5px" }, statusPills(count(r.findings)))))))) : null,
+      ck.known.length ? h("div", { class: "kline", style: "border:0;padding-top:8px" }, h("span", { class: "klabel" }, "Already in the graph"), ck.known.map((x) => kchip(x, x.name + " · in " + x.cases + " case(s)"))) : null,
+      h("div", { class: "row", style: "margin-top:10px" }, ck.case ? h("button", { class: "btn sm", onclick: kShow(ck.case) }, "Open this case in the knowledge graph") : null,
+        lv.length ? h("span", { class: "small muted" }, "Handed to the agents before they ran: " + lv.map(([k, n]) => n + " " + (LVL[k] || k).toLowerCase() + "-level").join(", ") + " nodes.") : null));
+  }
   function findingCard(f, opts) {
     const o = opts || {}, v = f.verifier || {};
     return h("div", { class: "card", id: "f-" + f.id }, h("div", { class: "row" }, pill(f.status), h("b", null, f.title), f.blocked ? pill("fail", "blocked: unsupported") : null, h("span", { class: "right small muted mono" }, f.id)),
@@ -349,6 +480,7 @@
         h("span", { class: "chip" }, "Agent: " + f.agent), h("span", { class: "chip" }, "Sources verified " + (v.verified || 0) + "/" + (v.sources || 0)), f.requires_human ? h("span", { class: "chip" }, "Needs a person") : null,
         f.human ? pill(f.human.decision === "accept" ? "pass" : "review", f.human.decision + "ed by " + f.human.by) : null,
         f.graph_path.length ? h("button", { class: "btn sm ghost", onclick: () => { S.view = "graph"; S.sel.path = f.graph_path; S.sel.node = "F:" + f.id; S.layers.reasoning = true; S.layers.assertion = true; render(); } }, "Show graph path (" + f.graph_path.length + " nodes)") : null),
+      knowledgeLine(f),
       o.review ? h("div", { class: "row", style: "margin-top:10px" }, h("button", { class: "btn sm", onclick: run(() => reviewFinding(f, "accept")) }, "Accept"), h("button", { class: "btn sm", onclick: run(() => reviewFinding(f, "flag")) }, "Flag")) : null);
   }
   async function reviewFinding(f, decision) { const v = await form((decision === "accept" ? "Accept" : "Flag") + ": " + f.title, [{ k: "reason", label: "Note for the audit trail", type: "textarea" }], decision === "accept" ? "Accept" : "Flag"); if (v) setCase(await api("cases/" + S.c.reference + "/review", { target: "finding", id: f.id, decision, reason: v.reason })); }
@@ -369,7 +501,7 @@
     return [section("Case intelligence summary", "What the package contains, what it supports and what stands in the way, composed from the findings."), h("div", { class: "stack" }, banner(a.recommendation),
       h("div", { class: "grid g4" }, [[S.c.documents.filter((d) => !d.removed).length, "documents, " + a.metrics.pages + " pages"], [c("pass"), "checks passed"], [c("fail") + c("missing") + c("review"), "need attention"], [g.nodes + " / " + g.edges, "graph nodes / edges"]].map(([v, l]) => h("div", { class: "tile" }, h("b", null, v), h("span", null, l)))),
       cardOf("Summary", h("p", null, a.summary), h("p", { class: "small muted", style: "margin-top:8px" }, "Assessment " + a.id + " · " + when(a.at) + " · trigger: " + a.trigger + " · profile v" + a.profile_version + " · vocabulary v" + a.overlay_version + " · " + a.metrics.duration_ms + " ms" + (a.contracts ? " · " + a.contracts.kept + " of " + a.contracts.runs + " agent contracts kept" : ""))),
-      known(a),
+      known(a), graphCard(),
       cardOf("Case facts", kv(prof().case.fields.map((f) => [f.name, S.c.fields[f.id]]))),
       cardOf("Parties and goods", h("table", null, h("thead", null, h("tr", null, ["Entity", "Kind", "Roles", "Mentioned in"].map((x) => h("th", null, x)))), h("tbody", null, a.entities.map((e) => h("tr", null, h("td", null, e.name), h("td", null, e.type), h("td", { class: "small" }, (e.roles || []).join(", ")),
         h("td", { class: "small muted" }, [...new Set(e.mentions.map((m) => m.doc_name))].join(", "))))))),
@@ -581,7 +713,7 @@
   }
   function orchDetail(o, sel) {
     const close = h("button", { class: "btn sm ghost right", onclick: () => { S.orch.sel = null; orchRefresh(); } }, "Close"), a = o.a;
-    const toKnowledge = (id) => run(async () => { await top("knowledge")(); if (id) await kEntity(id)(); });
+    const toKnowledge = (id) => (id ? kShow(id) : top("knowledge"));   // a node the agent was handed opens on the level map, along the way down to it
     const runBlock = (r) => { const c = r.contract || {}, g = r.grounding, sec = r.sections || {}, m = r.memory || {}, note = a && a.memory ? a.memory.working.find((n) => n.by === r.agent || n.key === r.stage + ".summary") : null;
       return h("div", { class: "orun" }, h("div", { class: "row" }, h("b", null, r.name), pill(r.status === "ok" ? "pass" : r.status === "failed" ? "fail" : "review", r.status), h("span", { class: "mono small muted" }, r.id), h("span", { class: "small muted" }, ms(r.duration_ms) + " · " + r.model + (r.prompt_version ? " · prompt " + r.prompt_version : ""))),
         h("p", { class: "small", style: "margin:4px 0 8px" }, r.summary), (r.notes || []).map((n) => h("p", { class: "small muted" }, n)),
@@ -590,7 +722,8 @@
           h("div", null, h("h4", null, "Contract " + (c.version ? "v" + c.version : "")), (c.needs || []).map((x) => h("div", { class: "ock " + (x.ok ? "ok" : "bad") }, h("i", null, x.ok ? "✓" : "✕"), h("span", null, h("b", null, "Needs: "), x.detail))), (c.promises || []).map((x) => h("div", { class: "ock " + (x.ok ? "ok" : "bad") }, h("i", null, x.ok ? "✓" : "✕"), h("span", null, x.text, h("span", { class: "muted" }, " " + x.detail)))),
             h("p", { class: "small muted" }, "If it fails: " + (c.on_failure || "–") + (r.budget && r.budget.max_calls ? " · model budget " + r.budget.calls + "/" + r.budget.max_calls + " calls" : "") + (r.throttle && r.throttle.waited_ms ? " · waited " + r.throttle.waited_ms + " ms" : ""))),
           h("div", null, h("h4", null, "Handed from the knowledge graph"), g && g.nodes ? [h("div", { class: "chips" }, Object.entries(g.by_class).map(([k, v]) => h("span", { class: "chip", style: "cursor:default" }, v + " " + words(k)))), h("div", { class: "chips", style: "margin-top:5px" }, Object.entries(g.by_level).map(([k, v]) => h("span", { class: "chip", style: "cursor:default;border-color:" + (LCOL[k] || "#ccc") }, (LVL[k] || k) + " level: " + v))),
-              h("div", { class: "chips", style: "margin-top:5px" }, g.ids.slice(0, 6).map((id) => h("button", { class: "chip", onclick: toKnowledge(id), title: "Open it in the knowledge graph" }, id.split("/").pop().replace(/-/g, " ").slice(0, 34))), g.nodes > 6 ? h("span", { class: "small muted" }, "and " + (g.nodes - 6) + " more") : null)] : h("p", { class: "small muted" }, g ? "Its contract names graph nodes, and this use case has none of them yet." : "Its contract asks for nothing from the graph."),
+              h("div", { class: "chips", style: "margin-top:5px" }, g.ids.slice(0, 6).map((id) => h("button", { class: "chip", onclick: toKnowledge(id), title: "Open it in the knowledge graph" }, id.split("/").pop().replace(/-/g, " ").slice(0, 34))), g.nodes > 6 ? h("span", { class: "small muted" }, "and " + (g.nodes - 6) + " more") : null),
+              g.rules_with_basis ? h("p", { class: "small muted", style: "margin-top:5px" }, "With the rules it was handed what " + g.rules_with_basis + " of them rest on (an article, a control or a term), and it put that on each finding it wrote.") : null] : h("p", { class: "small muted" }, g ? "Its contract names graph nodes, and this use case has none of them yet." : "Its contract asks for nothing from the graph."),
             r.graph_writes && (r.graph_writes.nodes || r.graph_writes.edges) ? h("p", { class: "small muted", style: "margin-top:5px" }, "Wrote +" + r.graph_writes.nodes + " nodes, +" + r.graph_writes.edges + " links to the case graph.") : null),
           h("div", null, h("h4", null, "Shared memory"), (sec.read || []).map((x) => h("div", { class: "small" }, "▲ read ", h("b", null, x.section), (x.from || []).length ? " left by " + x.from.join(", ") : "")), (m.reads || []).map((x) => h("div", { class: "small" }, "▲ read ", h("b", null, x.replace("workspace:", "the workspace's ")))),
             (sec.wrote || []).map((x) => h("div", { class: "small" }, "▼ left ", h("b", null, x))), note ? h("div", { class: "small" }, "▼ left a note: ", h("span", { class: "muted" }, note.value)) : null, (m.refused || []).map((x) => h("div", { class: "small", style: "color:var(--bad)" }, "refused: " + x)),
@@ -708,8 +841,9 @@
   // ---------------------------------------------------------------------------------------------- assistant
   function chat() {
     if (!S.chat) return h("button", { class: "chatbtn", onclick: () => { S.chat = true; render(); } }, "Ask the case");
-    const log = h("div", { class: "log" }, h("div", { class: "msg a" }, "Ask about this case. I answer from its documents and graph, cite what I used, and say so when they do not hold the answer."),
-      S.chatLog.map((m) => h("div", { class: "msg " + m.r + (m.no ? " no" : "") }, m.t, m.src && m.src.length ? h("div", { class: "chips", style: "margin-top:6px" }, m.src.slice(0, 5).map((s) => h("span", { class: "chip", onclick: () => (s.doc ? openSource(s) : s.id ? (S.view = "provenance", S.filter = { status: "all", family: "all" }, render()) : null) }, s.doc_name ? s.doc_name + (s.page ? " p" + s.page + (s.line ? " l" + s.line : "") : "") : s.id || s.kind))) : null)));
+    const log = h("div", { class: "log" }, h("div", { class: "msg a" }, "Ask about this case. I answer from its documents, its graph and what the knowledge graph says its rules rest on, cite what I used, and say so when they do not hold the answer."),
+      S.chatLog.map((m) => h("div", { class: "msg " + m.r + (m.no ? " no" : "") }, m.t, m.src && m.src.length ? h("div", { class: "chips", style: "margin-top:6px" }, [...m.src.filter((s) => s.kind === "knowledge").slice(0, 4), ...m.src.filter((s) => s.kind !== "knowledge").slice(0, 5)].map((s) => (s.kind === "knowledge" ? kchip({ id: s.id, level: "industry", type: "" }, kShort(s.name), "From the knowledge graph. " + s.name + ". " + s.text)
+        : h("span", { class: "chip", onclick: () => (s.doc ? openSource(s) : s.id ? (S.view = "provenance", S.filter = { status: "all", family: "all" }, render()) : null) }, s.doc_name ? s.doc_name + (s.page ? " p" + s.page + (s.line ? " l" + s.line : "") : "") : s.id || s.kind)))) : null)));
     const input = h("input", { type: "text", placeholder: "Type your question", "aria-label": "Question" });
     setTimeout(() => { log.scrollTop = log.scrollHeight; input.focus(); }, 0);
     return h("div", { class: "chat", role: "dialog", "aria-label": "Case assistant" }, h("header", null, "Case assistant", h("button", { class: "right", style: "background:none;border:0;color:#fff;cursor:pointer", "aria-label": "Close", onclick: () => { S.chat = false; render(); } }, "✕")), log,

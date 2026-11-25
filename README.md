@@ -25,7 +25,7 @@ kinds of document, the evidence it asks for, its rules. Five ship, each with inv
 | Agent contracts | what each agent needs, promises, may change, may spend and must never do | `foundation/contracts.yaml`, `contracts.py` |
 | Agent harness | the one place every agent runs; it enforces the contract and records the run | `harness.py` |
 | Shared memory | the run's notes, the case, and what the workspace has learned from earlier cases | `memory.py` |
-| Knowledge graph | one graph per workspace in the KB Forge knowledge-base layout; it grows with every case | `kb.py`, `foundation/ontology.yaml` |
+| Knowledge graph | one graph per workspace in the KB Forge knowledge-base layout: what each industry works under, what each use case asks for, what every case taught. Every finding opens the exact node its rule rests on | `kb.py`, `foundation/ontology.yaml`, `foundation/knowledge/*.yaml` |
 | Evidence provenance | every conclusion to a line of a document; every action in a chained ledger | `ledger.py` |
 | Throttling | rate limits and per-agent budgets on model calls; a gate on the API | `throttle.py` |
 
@@ -49,7 +49,7 @@ python -m docuinsights serve --port 8090
 ```
 
 Open the workbench and pick a use case on the home page: **Try it** on a sample runs it end to end. The top of the page
-has five screens: Home, Cases, Knowledge (everything learned, as a map of four levels: industry, domain, solution,
+has five screens: Home, Cases, Knowledge (everything known, as a map of four levels: industry, domain, solution,
 customer), Agents (their contracts) and How it is governed (contracts, memory, provenance, throttling as they stand).
 Inside a case: summary, documents, evidence, consistency, rules, the graph, provenance, the what-if simulator, the
 decision, and **Agent orchestration**: one board that shows the boss agent's plan, each agent run under its contract,
@@ -58,8 +58,23 @@ finished one back.
 
 ## The knowledge base and KB Forge
 
-Every assessed case adds to one knowledge graph per workspace, kept in the KB Forge knowledge-base layout
-(`data/default/knowledge/`). To open it in KB Forge: **Knowledge > Download for KB Forge**, then in KB Forge
+One knowledge graph per workspace, kept in the KB Forge knowledge-base layout (`data/default/knowledge/`). It starts
+with six curated knowledge bases (`src/docuinsights/foundation/knowledge/*.yaml`): five industries (finance
+operations, insurance, banking and lending, customs and trade, trade finance) with their standards and articles,
+processes, risks, controls, measures and terms, and the domain itself. Every rule of every use case is linked to the
+article, control or term it rests on, and every assessed case adds to the graph.
+
+* **Follow a finding to its reason.** A finding card names what its rule rests on; a click opens that exact node on
+  the level map, with the way down to it, what it says, how it is cited and every case it was used on. Each node has
+  a link of its own (`#/knowledge/<id>`) to send to someone.
+* **Manage it.** *Knowledge > Manage* switches a curated knowledge base off and on, moves an added one to another
+  level, and lists what was added by hand. To add a fact, open the node it belongs under and choose *Add under this*.
+* **Add your own.** Put YAML files like the shipped ones in a folder and name it in `DOCUINSIGHTS_KNOWLEDGE_DIR`.
+
+What the curated knowledge bases say is a short summary with its reference, written for this accelerator. It is not
+the text of a standard: read the current text before relying on it.
+
+To open the graph in KB Forge: **Knowledge > Download for KB Forge**, then in KB Forge
 *Import a graph*. To bring knowledge the other way: **Knowledge > Add a knowledge base** takes a KB Forge
 knowledge-base zip, a KB Forge graph page (.html) or a JSON file of nodes and edges. From the command line:
 

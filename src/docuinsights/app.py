@@ -5,7 +5,9 @@
 
     /                         the workbench
     /api/...                  what the workbench calls
-    /api/knowledge...         the workspace's knowledge base: overview, the level map, graph, one entity, search, import, export (.zip, KB Forge layout)
+    /api/knowledge...         the workspace's knowledge base: overview, the level map (opened on any one node), graph, one entity with the way down
+                              to it and where it is used, search, import, export (.zip, KB Forge layout), knowledge bases on and off, facts by hand
+    /api/cases/{ref}/knowledge   the case seen from the graph: each finding's node, the rule it applied and what that rule rests on
     /api/platform             the foundation as it stands: contracts, memory, provenance ledger, throttling
     /api/v1/cases             the integration surface: another system (a NewgenONE process, an ESB, a script) submits a
                               case package and reads the assessment back as JSON
@@ -67,7 +69,8 @@ def result(case: dict[str, Any]) -> dict[str, Any]:
             "documents": [{"id": d["id"], "name": d["name"], "version": d["current"], "uploaded_as": d.get("category"), "type": d.get("effective_type") or (d.get("classification") or {}).get("type"),
                            "confidence": (d.get("classification") or {}).get("confidence"), "fields": {k: f.get("value") for k, f in (d.get("fields") or {}).items()}}
                           for d in case["documents"] if not d.get("removed")],
-            "findings": [{k: f.get(k) for k in ("id", "family", "title", "status", "severity", "message", "requires_human")} for f in a.get("findings") or []],
+            "findings": [{**{k: f.get(k) for k in ("id", "family", "title", "status", "severity", "message", "requires_human")},
+                          "basis": [{k: b.get(k) for k in ("id", "name", "of", "citation")} for b in f.get("basis") or []]} for f in a.get("findings") or []],
             "decision": case.get("decision"), "filed": case.get("filed")}
 
 
@@ -196,13 +199,14 @@ def create_app(service: Service | None = None, *, tenant_of: Callable[[Request],
         q = r.query_params
         levels = [x.strip() for x in (q.get("levels") or "").split(",") if x.strip()]
         types = [x for x in (q.get("types") or "").split(",") if x.strip()]
-        svc.knowledge_overview(T(r))
-        return svc.knowledge(T(r)).subgraph(levels=levels or None, types=types or None, focus=q.get("focus") or None, limit=min(600, int(q.get("limit") or 220)))
+        return svc.knowledge_ready(T(r)).subgraph(levels=levels or None, types=types or None, focus=q.get("focus") or None, limit=min(600, int(q.get("limit") or 220)))
 
     def k_map(r: Request) -> dict[str, Any]:
         q = r.query_params
-        svc.knowledge_overview(T(r))
-        return svc.knowledge(T(r)).level_map([x for x in (q.get("open") or "").split(",") if x], [x for x in q.getlist("drill") if x])
+        return svc.knowledge_ready(T(r)).level_map([x for x in (q.get("open") or "").split(",") if x], [x for x in q.getlist("drill") if x], show=q.get("show") or None)
+
+    def k_fact(r: Request, d: dict[str, Any]) -> Any:
+        return svc.knowledge_fact(T(r), d, by=A(r)), 201
 
     def k_import(r: Request, d: dict[str, Any]) -> Any:
         name = str(d.get("name") or "").strip()
@@ -215,8 +219,7 @@ def create_app(service: Service | None = None, *, tenant_of: Callable[[Request],
         return svc.knowledge_import(T(r), name, data, str(d.get("label") or ""), level=str(d.get("level") or ""), by=A(r)), 201
 
     def k_export(r: Request) -> Response:
-        svc.knowledge_overview(T(r))
-        return Response(svc.knowledge(T(r)).export_zip(), media_type="application/zip",
+        return Response(svc.knowledge_ready(T(r)).export_zip(), media_type="application/zip",
                         headers={"content-disposition": 'attachment; filename="docuinsights-knowledge-base.zip"', "x-content-type-options": "nosniff"})
 
     def k_rebuild(r: Request, d: dict[str, Any]) -> dict[str, Any]:
@@ -261,8 +264,15 @@ def create_app(service: Service | None = None, *, tenant_of: Callable[[Request],
         Route("/api/knowledge", api(lambda r: svc.knowledge_overview(T(r)))),
         Route("/api/knowledge/graph", api(k_graph)),
         Route("/api/knowledge/map", api(k_map)),
-        Route("/api/knowledge/entity", api(lambda r: svc.knowledge(T(r)).entity(r.query_params.get("id") or ""))),
-        Route("/api/knowledge/search", api(lambda r: svc.knowledge(T(r)).search(r.query_params.get("q") or ""))),
+        Route("/api/knowledge/entity", api(lambda r: svc.knowledge_ready(T(r)).entity(r.query_params.get("id") or ""))),
+        Route("/api/knowledge/trail", api(lambda r: svc.knowledge_ready(T(r)).way_to(r.query_params.get("id") or ""))),
+        Route("/api/knowledge/search", api(lambda r: svc.knowledge_ready(T(r)).search(r.query_params.get("q") or ""))),
+        Route("/api/knowledge/bases/{id}", api(lambda r, d: svc.knowledge_switch(T(r), r.path_params["id"], bool(d.get("on")), by=A(r)), body=True), methods=["POST"]),
+        Route("/api/knowledge/facts", api(k_fact, body=True), methods=["POST"]),
+        Route("/api/knowledge/facts/{id}/remove", api(lambda r, d: svc.knowledge_fact_remove(T(r), r.path_params["id"], by=A(r)), body=True), methods=["POST"]),
+        Route("/api/knowledge/imports/{id}/place", api(lambda r, d: svc.knowledge_place(T(r), r.path_params["id"], str(d.get("level") or ""), by=A(r)), body=True), methods=["POST"]),
+        Route("/api/knowledge/imports/{id}/restore", api(lambda r, d: svc.knowledge_restore(T(r), r.path_params["id"], by=A(r)), body=True), methods=["POST"]),
+        Route("/api/cases/{ref}/knowledge", api(lambda r: svc.case_knowledge(T(r), ref(r)))),
         Route("/api/knowledge/export", api(k_export)),
         Route("/api/knowledge/imports", api(k_import, body=True), methods=["POST"]),
         Route("/api/knowledge/imports/{id}/remove", api(lambda r, d: svc.knowledge_remove(T(r), r.path_params["id"], by=A(r)), body=True), methods=["POST"]),

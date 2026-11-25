@@ -341,7 +341,14 @@ def test_every_use_case_reaches_its_outcome_and_every_agent_keeps_its_contract(s
     run = {r["agent"]: r for r in over["runs"]}
     assert run["intake"]["plan"]["tasks"] == ["Check and read purchase_order_b.pdf", "Check and read invoice_over.pdf", "Check and read goods_received_note_short.pdf"] and run["intake"]["grounding"] is None
     assert run["policy"]["plan"]["tasks"][0] == "Run the rule: Invoice total does not exceed the order" and len(run["policy"]["plan"]["tasks"]) == 3 and len(run["evidence"]["plan"]["tasks"]) == 3
-    assert run["classify"]["grounding"]["by_class"] == {"Document": 4} and run["classify"]["grounding"]["by_level"] == {"domain": 4} and run["policy"]["grounding"]["by_class"] == {"PolicyRule": 11}
+    assert run["classify"]["grounding"]["by_class"] == {"Document": 4} and run["classify"]["grounding"]["by_level"] == {"domain": 4}
+    # with its rules an agent is handed what each rule rests on, from the industry and the domain knowledge bases; the record keeps the count, the finding the content
+    handed = run["policy"]["grounding"]
+    assert handed["by_class"]["PolicyRule"] == 11 and {"BestPractice", "Provision", "Term"} <= set(handed["by_class"]) and set(handed["by_level"]) == {"domain", "industry"} and handed["rules_with_basis"] == 11 and "basis" not in handed
+    assert run["verification"]["grounding"]["by_class"] == {"PolicyRule": 11}, "an agent whose contract names only the rules is handed only the rules"
+    ruled = [f for f in over["findings"] if f.get("rule")]
+    assert ruled and all(f["basis"] and all(set(b) == {"id", "name", "type", "level", "of", "citation", "says"} for b in f["basis"]) for f in ruled), "every finding that applied a rule carries what the rule rests on"
+    assert {b["name"] for b in next(f for f in over["findings"] if f["id"] == "RULE-invoice_within_order")["basis"]} >= {"Three-way match"} and over["stages"]["policy"]["basis"] == 3
     assert run["resolve"]["grounding"]["by_class"]["Role"] == 2 and set(run["resolve"]["grounding"]["by_class"]) >= {"Organization", "Role"}, "the resolver is handed the organisations the workspace already knows"
     assert run["extract"]["sections"] == {"read": [{"section": "documents", "from": ["intake", "classify"]}], "wrote": ["documents"]}
     read = {x["section"]: x["from"] for x in run["verification"]["sections"]["read"]}
@@ -538,14 +545,16 @@ def test_the_knowledge_base_is_a_kb_forge_knowledge_base_that_grows_with_every_c
     buyer = by_id["organization/calder-vale-foods-ltd"]
     assert buyer["props"]["seenInCases"] == 2 and buyer["props"]["knowledgeLevel"] == ["customer"] and buyer["props"]["graphLevel"] == 6 and "buyer" in buyer["props"]["description"], "one organisation, met in two cases"
     uses = {t["subject"] for t in trips if t["predicate"] == "processUsesDocument" and t["object"] == "document/commercial-invoice"}
-    assert uses == {"usecase/customs-claim-intelligence", "usecase/trade-document-examination"}, "a kind of document two use cases share is one node"
+    assert {u for u in uses if u.startswith("usecase/")} == {"usecase/customs-claim-intelligence", "usecase/trade-document-examination"}, "a kind of document two use cases share is one node"
+    assert {"businessprocess/documentary-credit-examination", "businessprocess/customs-valuation"} <= uses, "and the industry's own processes use the same node"
     assert {"transactsWith", "caseInvolvesOrganization", "mentions", "documentOfKind", "findingAppliesRule", "findingCitesDocument", "productClassifiedAs", "referenceHasEntry", "useCaseServesIndustry", "domainCoversUseCase", "acceleratorHasAgent", "acceleratorForDomain", "findingProducedByAgent", "companyHasCase"} <= {t["predicate"] for t in trips}
 
     # KB Forge's four levels, top to bottom, each opening to the entities that head it; drilling only goes down
     levels = {lv["id"]: lv for lv in kb.overview()["levels"]}
     assert list(levels) == ["industry", "domain", "solution", "customer"] and all(lv["entities"] and lv["heads"] and lv["say"] for lv in levels.values())
     assert sum(lv["entities"] for lv in levels.values()) == len(ents) and all(KB.level_of(e) in levels and e["props"]["graphLevel"] in range(1, 7) for e in ents)
-    assert {tuple(e["props"]["knowledgeLevel"]) for e in ents} == {("industry",), ("domain",), ("coforge",), ("customer",)}, "stored as KB Forge stores a level: a list of its own level ids"
+    assert {tuple(e["props"]["knowledgeLevel"]) for e in ents} == {("industry",), ("domain",), ("coforge",), ("customer",), ("industry", "domain")}, "stored as KB Forge stores a level: a list of its own level ids, the first being where it is shown"
+    assert {e["name"] for e in ents if len(e["props"]["knowledgeLevel"]) > 1} == {"Evidence request rate", "Exception rate"}, "a measure an industry and the domain both use is one node, known at both levels"
     scene = kb.level_map(["industry", "domain", "solution", "customer"], [])
     assert {(n["level"], n["type"]) for n in scene["nodes"]} == {("industry", "IndustrySegment"), ("domain", "ExperienceDomain"), ("solution", "Accelerator"), ("customer", "Company")}
     assert {(x["s"], x["p"], x["o"]) for x in scene["links"]} >= {("accelerator/docuinsights", "acceleratorForDomain", "experiencedomain/document-and-case-intelligence")}
@@ -563,7 +572,8 @@ def test_the_knowledge_base_is_a_kb_forge_knowledge_base_that_grows_with_every_c
     cit = cits[sup["citation"]]
     assert cit["kind"] == "document" and cit["locator"].startswith("p.1 l.") and "Calder Vale Foods Ltd" in cit["quote"] and sup["check"] == "named" and sup["how"] == "extracted"
     stats = prov["verification"]["stats"]
-    assert stats["missing"] == 0 and stats["quoted"] > 100 and stats["named"] > 10 and set(prov["verification"]["origins"]["entities"]) <= {"document", "system", "settings", "web"}
+    assert stats["missing"] == 0 and stats["quoted"] > 100 and stats["named"] > 10 and set(prov["verification"]["origins"]["entities"]) == {"document", "system", "settings", "web", "curated"}
+    assert prov["verification"]["origins"]["entities"]["curated"] == 289, "what the curated industry and domain knowledge bases state is marked as curated, apart from what was read in a document"
     q = json.loads((root / "quality/metrics.json").read_text())
     assert q["score"] > 85 and set(q["components"]) == set(q["weights"]) and sum(q["weights"].values()) == 100
 
@@ -642,10 +652,22 @@ def test_knowledge_built_in_kb_forge_is_read_as_kb_forge_writes_it(svc):
     assert supplier["type"] == "MarketplaceVendor" and supplier["confidence"] == 0.9 and "Penrose Pack" in supplier["synonyms"], "the vendor is the supplier the case met"
     assert KB.level_of(supplier) == "customer" and KB.level_of(d["entities"]["finding/slow-checkout"]) == "industry" and d["entities"]["finding/slow-checkout"]["confidence"] == 0.35
     added = {"organizationtype/packaging-vendor", "finding/slow-checkout", "industrysegment/airlines", "vendor/unknown-carrier"}
-    assert got["import"]["placed"] == "industry" and d["index"]["byLevel"]["industry"] == 5 + 4 and d["index"]["stubs"] == 1 and added <= {n["id"] for n in kb.subgraph(levels=["industry"])["nodes"]}, "an industry knowledge base sits at the industry level"
+    assert got["import"]["placed"] == "industry" and d["index"]["byLevel"]["industry"] == 223 + 4 and d["index"]["stubs"] == 1 and added <= {n["id"] for n in kb.subgraph(levels=["industry"], limit=600)["nodes"]}, "an industry knowledge base sits at the industry level"
     assert svc.knowledge_import(T, "airlines.zip", data, level="domain")["import"]["placed"] == "domain" and KB.level_of(kb.load()["entities"]["finding/slow-checkout"]) == "domain", "or at the level chosen when it is added"
     assert next(t for t in d["triples"] if t["predicate"] == "painPointInIndustry")["confidence"] == 0.65 and kb.aliases() == {"penrose pack": "penrose packaging supplies"}
+    # an added knowledge base is managed like the others: moved to another level, taken out, put back; each is in the ledger
+    assert svc.knowledge_place(T, "airlines", "industry")["import"]["placed"] == "industry" and KB.level_of(kb.load()["entities"]["finding/slow-checkout"]) == "industry"
+    with pytest.raises(ServiceError):
+        svc.knowledge_place(T, "airlines", "nowhere")
+    listed = {b["id"]: b for b in kb.knowledge_bases() if b["kind"] == "added"}
+    assert listed["airlines"]["on"] and listed["airlines"]["level"] == "industry" and listed["airlines"]["entities"] == 5
     svc.knowledge_remove(T, "airlines")
+    assert not next(b for b in kb.knowledge_bases() if b["id"] == "airlines")["on"] and "finding/slow-checkout" not in kb.load()["entities"], "taken out, it is still listed so that it can be put back"
+    assert svc.knowledge_restore(T, "airlines")["index"]["entities"] == d["index"]["entities"] and "finding/slow-checkout" in kb.load()["entities"]
+    with pytest.raises(ServiceError):
+        svc.knowledge_restore(T, "airlines")
+    svc.knowledge_remove(T, "airlines")
+    assert [e["summary"] for e in svc.ledger(T).entries(limit=6) if e["kind"] == "knowledge"][:3] == ["Imported knowledge taken out: airlines", "Added knowledge put back: airlines", "Imported knowledge taken out: airlines"]
 
     page = {"export": {"app": "KB Forge", "version": "2.22.1", "exported_at": "2026-10-15T09:00:00Z"},
             "graph": {"title": "Airlines · combined", "kb_type": "hub", "ontology": {"classes": [{"name": "Traveller", "parent": "Person", "definition": "A person who flies."}],
@@ -674,6 +696,156 @@ def test_knowledge_built_in_kb_forge_is_read_as_kb_forge_writes_it(svc):
     case = svc.case(T, svc.cases(T)[0]["reference"])
     tools = svc.tools(T, case, get_profile("supplier_invoice"))
     assert tools.overlay["signals"]["goods_received_note"] == ["receiving report", "goods receipt advice"] and kb.signals(get_profile("supplier_invoice")) == {"goods_received_note": ["receiving report", "goods receipt advice"]}
+
+
+def test_a_finding_is_followed_to_the_exact_node_its_rule_rests_on(svc):
+    """The curated industry and domain knowledge bases, and the way from any finding to the article, control or term behind it."""
+    fresh = svc.knowledge_overview(T)
+    assert fresh["index"]["knowledge_problems"] == [] and fresh["index"]["stubs"] == 0 and fresh["index"]["entities"] > 400, "the knowledge bases that come with the accelerator resolve every name they use"
+    bases = {b["id"]: b for b in fresh["knowledge_bases"]}
+    assert set(bases) == {"banking-and-lending", "customs-and-trade", "finance-operations", "insurance", "trade-finance", "document-and-case-intelligence"}
+    assert all(b["kind"] == "curated" and b["on"] and b["shipped"] and b["entities"] > 40 and b["states"]["standards"] >= 4 for b in bases.values())
+    assert bases["trade-finance"]["level"] == "industry" and bases["trade-finance"]["head_id"] == "industrysegment/trade-finance" and bases["document-and-case-intelligence"]["level"] == "domain"
+    kb = svc.knowledge(T)
+    ents = kb.load()["entities"]
+    rules = [e["id"] for e in ents.values() if e["type"] == "PolicyRule"]
+    assert len(rules) > 60 and all(kb.basis(r) for r in rules), "every rule of every use case rests on something a knowledge base states"
+    heads = {"industrysegment/trade-finance", "industrysegment/customs-and-trade", "industrysegment/finance-operations", "industrysegment/insurance", "industrysegment/banking-and-lending",
+             "experiencedomain/document-and-case-intelligence", "accelerator/docuinsights"}
+    assert all(kb.trail(e)[0] in heads and kb.trail(e)[-1] == e for e in ents), "every node has a way down to it from the head of a level"
+
+    # the way down to one article, and the map opened along it
+    art = "provision/ucp-600-article-14-c-presentation-within-21-days-of-shipment"
+    assert kb.trail(art) == ["industrysegment/trade-finance", "standard/ucp-600", art] and [x["name"] for x in kb.way_to(art)] == ["Trade finance", "UCP 600", "UCP 600 article 14(c): presentation within 21 days of shipment"]
+    names = [(e["type"], KB.O.normalize_name(e["name"])) for e in ents.values()]
+    assert len(names) == len(set(names)), "no two things of a kind share a name once brackets are dropped, so KB Forge keeps each article as a node of its own"
+    closed = kb.level_map(["solution"], [])
+    assert art not in {n["id"] for n in closed["nodes"]}
+    scene = kb.level_map(["solution"], [], show=art)
+    shown = {n["id"]: n for n in scene["nodes"]}
+    assert scene["trail"] == kb.trail(art) and set(scene["trail"]) <= set(shown) and shown[art]["from"] == "standard/ucp-600" and "industry" in scene["open"] and scene["drilled"] == ["industrysegment/trade-finance", "standard/ucp-600"]
+    with pytest.raises(KeyError):
+        kb.trail("provision/nothing-of-the-kind")
+    said = kb.entity(art)
+    assert said["origin"] == "curated" and said["level"] == "industry" and said["entity"]["props"]["citation"] == "ICC Publication No. 600, article 14(c)" and "21 calendar days" in said["entity"]["props"]["description"]
+    assert [x["id"] for x in said["usage"]["rules"]] == ["policyrule/presented-within-the-presentation-period"] and said["usage"]["findings"] == 0 and said["attach"] == []
+
+    # a case: each finding names what its rule rests on, in the industry of its own use case
+    lc = assessed(svc, "discrepant", "trade_finance")
+    cc = assessed(svc, "positive", "customs_claim")
+    late = next(f for f in lc["assessment"]["findings"] if f["id"] == "RULE-latest_shipment")
+    assert [b["id"] for b in late["basis"]] == ["provision/ucp-600-article-20-a-ii-shipped-on-board-at-the-port-of-loading", "term/latest-shipment-date"] and late["basis"][0]["of"] == "UCP 600" and late["basis"][0]["citation"].endswith("article 20(a)(ii)")
+    inv = {c["reference"]: {b["of"] or b["name"] for b in next(f for f in c["assessment"]["findings"] if f["id"] == "EV-invoice")["basis"]} for c in (lc, cc)}
+    assert "UCP 600" in inv[lc["reference"]] and "UCP 600" not in inv[cc["reference"]] and "Union Customs Code" in inv[cc["reference"]] and "Union Customs Code" not in inv[lc["reference"]], \
+        "one rule two use cases share rests on a different text in each industry"
+    ck = svc.case_knowledge(T, lc["reference"])
+    assert ck["case"] == "case/pres-2026-00731" and set(ck["findings"]) == {f["id"] for f in lc["assessment"]["findings"]} and all(row["node"] in kb.load()["entities"] and row["rule"] for row in ck["findings"].values())
+    ucp = next(r for r in ck["rests_on"] if r["id"] == "standard/ucp-600")
+    assert "UCP 600 article 14(c): presentation within 21 days of shipment" in ucp["points"] and len({f["id"] for f in ucp["findings"]}) == len(ucp["findings"]) and {f["status"] for f in ucp["findings"]} == {"pass", "fail", "missing"}
+    assert ck["handed"]["industry"] > 10 and ck["handed"]["domain"] > 10
+    row = ck["findings"]["RULE-latest_shipment"]
+    node = kb.entity(row["node"])   # the finding's own node: the way to it, the rule it applied, what the rule rests on
+    assert [x["type"] for x in node["trail"]] == ["Company", "Case", "CaseFinding"] and node["rule"]["id"] == row["rule"]["id"] and [b["id"] for b in node["basis"]] == [b["id"] for b in late["basis"]]
+    used = kb.entity("standard/ucp-600")["usage"]
+    assert [c["name"] for c in used["cases"]] == [lc["reference"]] and used["findings"] == 19 and used["by_status"] == {"pass": 16, "fail": 2, "missing": 1}, "a standard of one industry is not counted on a case of another"
+    assert {c["name"] for c in kb.entity("bestpractice/evidence-completeness-check")["usage"]["cases"]} == {lc["reference"], cc["reference"]}, "a practice of the domain is used wherever its rules ran"
+    api = __import__("docuinsights.app", fromlist=["result"]).result(lc)
+    assert next(f for f in api["findings"] if f["id"] == "RULE-latest_shipment")["basis"][0] == {"id": "provision/ucp-600-article-20-a-ii-shipped-on-board-at-the-port-of-loading", "name": "UCP 600 article 20(a)(ii): shipped on board at the port of loading", "of": "UCP 600", "citation": "ICC Publication No. 600, article 20(a)(ii)"}
+
+    # what the workspace already knew is a node too
+    assessed(svc, "clean", "supplier_invoice")
+    dup = svc.case_knowledge(T, assessed(svc, "duplicate", "supplier_invoice")["reference"])
+    assert {k["id"] for k in dup["known"]} >= {"identifier/invoice-pps-104471", "organization/penrose-packaging-supplies-ltd"} and dup["findings"]["MEM-reference-2"]["basis"][0]["name"] == "Duplicate detection across cases"
+
+    # the assistant answers with the article as a source, and the source is the node
+    ans = svc.ask(T, lc["reference"], "Which article is the late shipment based on?")
+    cited = [x for x in ans["sources"] if x["kind"] == "knowledge"]
+    assert "basis" in ans["intents"] and ans["grounded"] and cited[0]["id"] == "provision/ucp-600-article-20-a-ii-shipped-on-board-at-the-port-of-loading" and "UCP 600 article 20(a)(ii)" in ans["answer"] and cited[0]["finding"] == "RULE-latest_shipment"
+    assert not [x for x in svc.ask(T, lc["reference"], "Who is the beneficiary?")["sources"] if x["kind"] == "knowledge"], "a question about a fact of the case is answered from the case"
+
+    # switching a knowledge base off takes what it states out of the graph, and on puts it back
+    before = kb.load()["index"]
+    off = svc.knowledge_switch(T, "trade-finance", False)["index"]
+    assert off["entities"] < before["entities"] and off["knowledge_problems"] == [] and off["stubs"] == 0 and "standard/ucp-600" not in kb.load()["entities"]
+    assert not next(b for b in kb.knowledge_bases() if b["id"] == "trade-finance")["on"] and [b["name"] for b in kb.basis("policyrule/presented-within-the-presentation-period")] == []
+    assert svc.assess(T, lc["reference"])["assessment"]["recommendation"]["outcome"] == "review", "the rules are code: the outcome does not depend on the knowledge base"
+    on = svc.knowledge_switch(T, "trade-finance", True)["index"]
+    assert (on["entities"], on["triples"]) == (before["entities"], before["triples"])
+    with pytest.raises(ServiceError):
+        svc.knowledge_switch(T, "no-such-base", True)
+
+    # a fact by hand hangs under an exact node, by a link the ontology has for the two kinds
+    assert [(o["type"], o["relation"], o["direction"]) for o in kb.attach_options("standard/ucp-600")] == [("Provision", "provisionOf", "out")]
+    assert {o["type"] for o in kb.attach_options("industrysegment/trade-finance")} == {"Standard", "Regulation", "BestPractice", "Risk", "BusinessProcess", "KPI", "Term"}
+    assert [(o["type"], o["direction"]) for o in kb.attach_options("policyrule/applicant-is-the-buyer")] == [("Provision", "in"), ("BestPractice", "in"), ("Term", "in")]
+    fact = svc.knowledge_fact(T, {"type": "Provision", "name": "UCP 600 article 15(a)", "description": "A complying presentation must be honoured.", "source": "ICC Publication No. 600, article 15(a)",
+                                 "links": [{"to": "standard/ucp-600", "relation": "provisionOf", "direction": "out"}]}, by="examiner")
+    mine = kb.entity(fact["fact"]["entity"])
+    assert mine["origin"] == "manual" and mine["by_hand"] == fact["fact"]["id"] and mine["level"] == "industry" and [x["name"] for x in mine["trail"]] == ["Trade finance", "UCP 600", "UCP 600 article 15(a)"]
+    assert mine["support"][0]["source"] == "added by examiner" and "article 15(a)" in mine["support"][0]["text"] and fact["index"]["entities"] == before["entities"] + 1
+    svc.knowledge_fact(T, {"type": "Provision", "name": "UCP 600 article 15(a)", "links": [{"to": "policyrule/applicant-is-the-buyer", "relation": "ruleBasedOn", "direction": "in"}]})
+    assert "UCP 600 article 15(a)" in [b["name"] for b in kb.basis("policyrule/applicant-is-the-buyer")] and len(kb.facts()) == 1 and len(kb.facts()[0]["links"]) == 2 and kb.facts()[0]["description"], "the same thing added under a second node is one fact with both links"
+    again = svc.assess(T, lc["reference"])["assessment"]
+    assert "UCP 600 article 15(a)" in [b["name"] for b in next(f for f in again["findings"] if f["id"] == "CON-applicant_buyer")["basis"]], "the next assessment hands the agents what was added"
+    for bad in ({"type": "Provision", "name": "Loose"}, {"type": "Provision", "name": "Loose", "links": [{"to": "standard/none"}]}, {"type": "Risk", "name": "Loose", "links": [{"to": "standard/ucp-600", "relation": "riskInIndustry"}]},
+                {"type": "Nonsense", "name": "Loose", "links": [{"to": "standard/ucp-600"}]}, {"type": "Provision", "name": " ", "links": [{"to": "standard/ucp-600"}]}):
+        with pytest.raises(ServiceError):
+            svc.knowledge_fact(T, bad)
+    with pytest.raises(ServiceError, match="reads as the same name as 'UCP 600 article 15\\(a\\)'"):
+        svc.knowledge_fact(T, {"type": "Provision", "name": "UCP 600 article 15(b)", "links": [{"to": "standard/ucp-600", "relation": "provisionOf"}]})
+    gone = svc.knowledge_fact_remove(T, fact["fact"]["id"])["index"]
+    assert (gone["entities"], gone["triples"]) == (before["entities"], before["triples"]) and kb.facts() == []
+    with pytest.raises(ServiceError):
+        svc.knowledge_fact_remove(T, fact["fact"]["id"])
+    said = [e["summary"] for e in svc.ledger(T).entries(limit=40) if e["kind"] == "knowledge"]
+    assert {"Knowledge base switched off: trade-finance", "Knowledge base switched on: trade-finance", "Added by hand: UCP 600 article 15(a) (Provision)", "Taken out, added by hand: provision-ucp-600-article-15-a"} <= set(said) and svc.ledger(T).verify()["ok"]
+
+
+def test_an_installation_adds_knowledge_bases_of_its_own(svc, tmp_path, monkeypatch):
+    """A knowledge base is one YAML file. A folder of its own lets an installation add to an industry or replace a shipped one; a file that
+    cannot be used is said so and never stops the graph from being built."""
+    folder = tmp_path / "knowledge"
+    folder.mkdir()
+    (folder / "house.yaml").write_text("""
+id: house-finance-controls
+kind: industry
+head: Finance operations
+name: House finance controls
+version: "2.1"
+practices:
+  - name: Second approver above the limit
+    says: An invoice above the approval limit is released by a second approver.
+    guards: [Duplicate payment]
+standards:
+  - name: Group finance manual
+    by: Group finance
+    cite: Group finance manual, 2026 edition
+    says: The group's own rules for paying suppliers.
+    provisions:
+      - {ref: section 4.2, says: "An invoice is paid only against a purchase order raised before it."}
+bodies:
+  - {name: Group finance, says: The group's finance function.}
+basis:
+  supplier_invoice:
+    rules.ordered_before_invoiced: [Group finance manual section 4.2]
+    rules.invoice_within_order: [Second approver above the limit, A control nobody defined]
+""", encoding="utf-8")
+    (folder / "broken.yaml").write_text("id: [unclosed\n  kind: industry", encoding="utf-8")
+    (folder / "notes.yml").write_text("title: just some notes\n", encoding="utf-8")
+    monkeypatch.setenv("DOCUINSIGHTS_KNOWLEDGE_DIR", str(folder))
+    ov = svc.knowledge_overview(T)
+    house = next(b for b in ov["knowledge_bases"] if b["id"] == "house-finance-controls")
+    assert house["on"] and not house["shipped"] and house["version"] == "2.1" and house["file"] == "house.yaml" and house["head_id"] == "industrysegment/finance-operations" and house["states"] == {"bodies": 1, "standards": 1, "practices": 1, "provisions": 1}
+    problems = ov["index"]["knowledge_problems"]
+    assert len(problems) == 3 and any(p.startswith("broken.yaml: could not be read as YAML") for p in problems) and any(p.startswith("notes.yml: not a knowledge base") for p in problems)
+    assert any("A control nobody defined" in p and p.startswith("house-finance-controls:") for p in problems), "a name nothing defines is reported, and the rest of the knowledge base is used"
+    kb = svc.knowledge(T)
+    assert [x["name"] for x in kb.way_to("provision/group-finance-manual-section-4-2")] == ["Finance operations", "Group finance manual", "Group finance manual section 4.2"]
+    assert "Group finance manual section 4.2" in [b["name"] for b in kb.basis("policyrule/the-order-precedes-the-invoice")] and "Second approver above the limit" in [b["name"] for b in kb.basis("policyrule/invoice-total-does-not-exceed-the-order")]
+    case = assessed(svc, "mismatch", "supplier_invoice")
+    assert "Second approver above the limit" in [b["name"] for b in next(f for f in case["assessment"]["findings"] if f["id"] == "RULE-invoice_within_order")["basis"]]
+    monkeypatch.delenv("DOCUINSIGHTS_KNOWLEDGE_DIR")
+    assert svc.knowledge(T).rebuild(list(load_profiles().values()))["knowledge_problems"] == [] and "provision/group-finance-manual-section-4-2" not in kb.load()["entities"]
 
 
 def test_wrong_keys_are_counted_per_address_and_age_out():

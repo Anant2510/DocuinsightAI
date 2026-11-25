@@ -12,7 +12,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from . import contracts as C, extras, harness as H, kb as KB, model as M, pipeline as P, reader, repository as Repo, throttle as T
+from . import contracts as C, extras, harness as H, kb as KB, model as M, ontology as O, pipeline as P, reader, repository as Repo, throttle as T
 from .ledger import Ledger, digest
 from .memory import SCOPES, Episodes
 from .casefile import current, doc_type, event, live_docs, new_case, now
@@ -483,6 +483,10 @@ class Service:
 
     # ------------------------------------------------------------------ the knowledge base and the platform, as callers see them
     def knowledge_overview(self, tenant: str) -> dict[str, Any]:
+        return self.knowledge_ready(tenant).overview()
+
+    def knowledge_ready(self, tenant: str) -> KB.KnowledgeBase:
+        """The workspace's knowledge base, built if this is the first look at it (or the first since an upgrade)."""
         kb = self.knowledge(tenant)
         if not kb.built():   # the first look: what the use cases declare, and every case assessed before the knowledge base existed
             episodes = self.episodes(tenant)
@@ -497,7 +501,7 @@ class Service:
                 except Exception:   # a case from an older version that cannot be read this way is left out, not fatal
                     continue
             kb.rebuild(list(load_profiles().values()))
-        return kb.overview()
+        return kb
 
     def knowledge_import(self, tenant: str, filename: str, data: bytes, label: str = "", *, level: str = "", by: str = "caseworker") -> dict[str, Any]:
         kb = self.knowledge(tenant)
@@ -517,6 +521,50 @@ class Service:
         index = kb.rebuild(list(load_profiles().values()))
         self.ledger(tenant).append("knowledge", by, f"Imported knowledge taken out: {import_id}", data={"import": import_id, "entities": index["entities"]})
         return {"index": index}
+
+    def _knowledge_changed(self, tenant: str, by: str, what: str, data: dict[str, Any]) -> dict[str, Any]:
+        """Rebuild after the knowledge behind the graph was changed by a person, and put the change in the ledger."""
+        index = self.knowledge(tenant).rebuild(list(load_profiles().values()))
+        self.ledger(tenant).append("knowledge", by, what, data={**data, "entities": index["entities"], "relationships": index["triples"]})
+        return index
+
+    def knowledge_switch(self, tenant: str, pack_id: str, on: bool, *, by: str = "caseworker") -> dict[str, Any]:
+        try:
+            self.knowledge_ready(tenant).switch(pack_id, on)
+        except KeyError as exc:
+            raise ServiceError(str(exc.args[0]), 404) from exc
+        return {"index": self._knowledge_changed(tenant, by, f"Knowledge base switched {'on' if on else 'off'}: {pack_id}", {"knowledge_base": pack_id, "on": on})}
+
+    def knowledge_place(self, tenant: str, import_id: str, level: str, *, by: str = "caseworker") -> dict[str, Any]:
+        try:
+            src = self.knowledge(tenant).place_import(import_id, level)
+        except KeyError as exc:
+            raise ServiceError(str(exc.args[0]), 404) from exc
+        except ValueError as exc:
+            raise ServiceError(str(exc)) from exc
+        return {"import": src, "index": self._knowledge_changed(tenant, by, f"Added knowledge moved: {src['label']} to {O.LEVELS.get(level, 'the level each entity came with')}", {"import": import_id, "level": level})}
+
+    def knowledge_restore(self, tenant: str, import_id: str, *, by: str = "caseworker") -> dict[str, Any]:
+        if not self.knowledge(tenant).restore_source("imports", import_id):
+            raise ServiceError("no such knowledge base to put back", 404)
+        return {"index": self._knowledge_changed(tenant, by, f"Added knowledge put back: {import_id}", {"import": import_id})}
+
+    def knowledge_fact(self, tenant: str, fact: dict[str, Any], *, by: str = "caseworker") -> dict[str, Any]:
+        try:
+            rec = self.knowledge_ready(tenant).add_fact(fact, by)
+        except (ValueError, KeyError) as exc:
+            raise ServiceError(str(exc.args[0])) from exc
+        index = self._knowledge_changed(tenant, by, f"Added by hand: {rec['name']} ({rec['type']})", {"fact": rec["id"], "entity": rec["entity"]})
+        return {"fact": rec, "index": index}
+
+    def knowledge_fact_remove(self, tenant: str, fact_id: str, *, by: str = "caseworker") -> dict[str, Any]:
+        if not self.knowledge(tenant).drop_source("manual", fact_id):
+            raise ServiceError("no such fact", 404)
+        return {"index": self._knowledge_changed(tenant, by, f"Taken out, added by hand: {fact_id}", {"fact": fact_id})}
+
+    def case_knowledge(self, tenant: str, reference: str) -> dict[str, Any]:
+        """The case seen from the knowledge graph: the node of every finding, the rule it applied and what that rule rests on."""
+        return self.knowledge_ready(tenant).case_knowledge(self.case(tenant, reference))
 
     def platform(self, tenant: str) -> dict[str, Any]:
         """The foundation as it stands: contracts, harness results, memory, provenance, throttling."""

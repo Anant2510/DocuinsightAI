@@ -174,8 +174,8 @@ the third level is called Solution.
 
 | Level | What is on it | Heads it |
 | --- | --- | --- |
-| **Industry** | the industry segments the use cases serve | `IndustrySegment` |
-| **Domain** | the experience domain, its use cases, and what each asks for: kinds of document, roles, rules, reference sources and their entries | `ExperienceDomain` |
+| **Industry** | each industry the use cases serve and what it works under: its standards and regulations with their articles, its processes, risks, controls, measures and terms | `IndustrySegment` |
+| **Domain** | the experience domain (its challenges, capabilities, practices, measures, terms and the standards it follows), its use cases, and what each asks for: kinds of document, roles, rules, reference sources and their entries | `ExperienceDomain` |
 | **Solution** | the accelerator and its agents, each with its contract (KB Forge's third level, delivery experience) | `Accelerator` |
 | **Customer** | the workspace (a `Company`), its cases, and what the cases hold: files, organisations, goods, reference numbers, findings. This is the level that grows | `Company` |
 
@@ -185,20 +185,86 @@ levels sits at the first and says the others). Knowledge with no level at all is
 
 The **Knowledge** screen opens on the **level map**, as KB Forge draws one: the four levels as boxes stacked top to
 bottom, each with the entities at its head. A click on an entity opens what is below it, and drilling only goes down
-(an industry opens its use cases, a use case its documents and rules, the workspace its cases, a case what it holds).
-Inside a level each row is one kind of thing. *Network* shows the same graph as a force layout.
-`GET /api/knowledge/map?open=industry,domain&drill=<entity id>` returns the scene.
+(an industry opens its standards, processes and risks, a standard its articles, a use case its documents and rules,
+the workspace its cases, a case what it holds). Inside a level each row is one kind of thing, and a kind can be
+hidden. *Network* shows the same graph as a force layout. *Manage* lists everything the graph is built from.
+`GET /api/knowledge/map?open=industry,domain&drill=<entity id>&show=<entity id>` returns the scene.
 
-The graph is never edited in place. It is rebuilt from its sources after every assessment, decision and import, so
-nothing is lost and nothing is counted twice: the profiles, one contribution per assessed case
-(`knowledge/sources/cases/`), and imported knowledge (`knowledge/sources/imports/`).
+The graph is never edited in place. It is rebuilt from its sources after every assessment, decision, import and change
+made on the Manage view, so nothing is lost and nothing is counted twice: the curated knowledge bases, the profiles,
+one contribution per assessed case (`knowledge/sources/cases/`), what was added by hand
+(`knowledge/sources/manual/`), and imported knowledge (`knowledge/sources/imports/`).
+
+**Industry and domain knowledge bases.** The accelerator comes with six curated knowledge bases, one YAML file each
+in `foundation/knowledge/`: finance operations, insurance, banking and lending, customs and trade, trade finance, and
+the domain itself (document and case intelligence). They use KB Forge's own classes (`Standard`, `Regulation`,
+`StandardsBody`, `BusinessProcess`, `Risk`, `KPI`, `Term`, `BestPractice`, `Capability`, `Challenge`) and one class
+this graph adds, `Provision`: one article of a standard, cited by its reference. A fresh workspace knows 433 things
+and 1,087 links before its first case.
+
+```yaml
+id: trade-finance
+kind: industry                 # or: domain
+head: Trade finance            # the industry segment (or the domain) it belongs to
+standards:
+  - name: UCP 600
+    by: International Chamber of Commerce
+    cite: ICC Publication No. 600
+    says: The rules a documentary credit is examined under.
+    provisions:
+      - {ref: article 14(c), about: "presentation within 21 days of shipment", says: "A presentation ... not later than 21 calendar days after the date of shipment ..."}
+risks:
+  - {name: Late presentation, says: ..., signs: [...], caught_by: ["rule:trade_finance/rules.presentation_period"]}
+basis:                         # why each rule of a use case exists
+  trade_finance:
+    rules.presentation_period: [UCP 600 article 14(c), Presentation period]
+```
+
+Every statement cites its knowledge base and, for an article, the reference of the standard. What they say is a short
+summary written for the knowledge base, marked on screen as *curated reference knowledge*; it is general knowledge of
+the industry, not the text of a standard, and not a substitute for reading the current text. `basis` is what makes
+the graph a proof: it links every rule of every use case (`ruleBasedOn`) to the article, control or term it applies,
+and a rule two use cases share rests on a different text in each industry. An article is named with its subject
+(`UCP 600 article 14(c): presentation within 21 days of shipment`) because KB Forge drops brackets when it compares
+names: named by number alone, the paragraphs of one article would be one node there. A build reports two names that
+would be joined, a name a knowledge base uses that nothing defines, and a file it could not read; none of these stops
+the build.
+
+An installation adds knowledge bases of its own by putting files in the folder `DOCUINSIGHTS_KNOWLEDGE_DIR` names: a
+file with a new `id` adds to an industry or to the domain (a house manual and its sections, a control, the basis of a
+rule), a file with the `id` of a shipped one replaces it.
+
+**From a finding to the exact node.** Each node has an address of its own, `#/knowledge/<entity id>`. Opening it
+opens the level map along the way down to the node (the head of its level, what it sits under, the node), with that
+way drawn on the map and as a breadcrumb in the node's panel. The panel says what the node states and how it is
+cited, **what its rule rests on** (for a rule or a finding), **where it is used** (the rules that rest on it, the
+findings they produced by status, the cases, each opening the case or the finding's own node), every link grouped by
+kind, and where the node came from.
+
+* The harness hands the evidence, policy and contradiction agents, with the rules of the use case, what each rule
+  rests on. The agent puts it on every finding it produces (`finding.basis`: the node id, name, citation and what it
+  says), so the finding card names the article and opens it, and `GET /api/v1/cases/{ref}` carries it to another
+  system. The rules stay code: a knowledge base switched off changes what a finding cites, never its result.
+* The case summary shows **what the knowledge graph says about the case**: the standards and controls its checks rest
+  on with the result of each check, and what the graph already held (an invoice number, a party) before the case.
+  `GET /api/cases/{ref}/knowledge` returns it, with the node of every finding.
+* The case assistant cites the article as a numbered source when a question asks why, and the source opens the node.
+
+**Managing it** (*Knowledge > Manage*; every change is rebuilt at once and written to the ledger):
+
+| What | How |
+| --- | --- |
+| Switch a curated knowledge base off or on | `POST /api/knowledge/bases/{id}` `{on}`. Off, nothing it states is in the graph; its file is untouched |
+| Move an added knowledge base to another level, take it out, put it back | `POST /api/knowledge/imports/{id}/place` `{level}`, `/remove`, `/restore` |
+| Add a fact by hand | Open the node it belongs under and choose *Add under this*: an article under its standard, a control or a risk under its industry, what a rule rests on under the rule (`POST /api/knowledge/facts`). Only the kinds the ontology links to that node are offered. It is marked *added by hand*, with who added it and what they cite, and can be taken out |
+| Build the graph again | `POST /api/knowledge/rebuild` |
 
 * **Evidence.** Every entity and link carries what supports it: a document citation (file, page and line, the quote),
   the case record, a profile declaration, a retrieved reference, an import, a person's decision, or an inference with
   its basis.
 * **Verification.** Every build checks each document citation against the text it cites, with no model: `named`,
   `quoted`, `read`, `paraphrased`, `missing`, `unchecked`. From the checks each entity and link gets an origin
-  (`document`, `system`, `settings`, `web`, `imported`, `inferred`, `decision`, `unverified`).
+  (`document`, `system`, `settings`, `web`, `curated`, `manual`, `imported`, `inferred`, `decision`, `unverified`).
 * **Quality.** The score follows KB Forge's formula (link density, stub freedom, connectedness, description coverage,
   ontology coverage, validity) with one component changed: where KB Forge asks a model how well the graph answers its
   competency questions, this graph reports the share of entities and links whose evidence was found (15%).
@@ -212,8 +278,8 @@ nothing is lost and nothing is counted twice: the profiles, one contribution per
 
 **What has been checked against KB Forge, and what has not.** Out: the export was read by KB Forge 2.23's own import
 code (its reader, its mapper and its graph build, run outside the app with the database stubbed): every entity kept
-under the same id (444 of 444), `knowledgeLevel` kept as written, every class and relationship kept as it is, none of
-this graph's links rejected or downgraded. Imported there as a domain, KB Forge adds a placement link of its own from
+under the same id (733 of 733, with the curated knowledge bases and twelve assessed cases), `knowledgeLevel` kept as
+written, every class and relationship kept as it is, none of this graph's links rejected or downgraded. Imported there as a domain, KB Forge adds a placement link of its own from
 the domain to each of the 16 agents and keeps those as `relatedTo`: its `platformInDomain` is reserved for a
 `Platform`. In: 43 real KB Forge sources were added to a trial workspace (22 knowledge-base folders, 2 zips, 19
 combined-graph pages; 89,956 entity records and 254,883 links, which merge to 17,532 entities and 56,396 links): all
@@ -281,6 +347,7 @@ model once at start and prints `ONLINE`, or the reason it is not answering (it s
 | `DOCUINSIGHTS_REPOSITORY` | `local` (default) or `omnidocs` |
 | `DOCUINSIGHTS_MODEL_RPM`, `_TPM`, `_CONCURRENCY`, `_MAX_WAIT_S`, `DOCUINSIGHTS_API_RPM`, `DOCUINSIGHTS_MAX_ASSESSMENTS` | throttling (see above); 0 switches a limit off |
 | `DOCUINSIGHTS_KNOWLEDGE_NAME` | the name the knowledge base carries when it is exported |
+| `DOCUINSIGHTS_KNOWLEDGE_DIR` | a folder of this installation's own knowledge bases (YAML, as in `foundation/knowledge/`), read after the ones that come with the accelerator |
 | `DOCUINSIGHTS_WORKSPACE_NAME` | the name of the customer level in the knowledge graph (`This workspace`) |
 
 To ship it as its own repository: `python scripts/export_docuinsights.py dist/docuinsights` writes a self-contained
@@ -365,6 +432,10 @@ scanned sample, which carries its transcription beside it so the demo runs witho
   it is rebuilt in full after each case (fine for thousands of entities, not for millions).
 * A time limit in a contract is reported when it is passed; a running agent is not interrupted.
 * Memory recalls by exact name key and exact reference number; there is no semantic (vector) recall.
+* The curated knowledge bases are summaries with references, written once: they carry no text of a standard, and
+  nothing checks them against a newer edition. The EU texts named are examples of a jurisdiction, not a full set.
+* A fact added by hand is one named thing under one node. There is no editor for the curated files on screen (they
+  are YAML in a folder), and no review step between a person adding a fact and the graph using it.
 * The ledger is one file per workspace on the same disk as the cases: it shows tampering, it does not prevent it.
 * No malware scan at intake: the checks are type, size and signature.
 * A scanned PDF with no text layer is not read yet. A scanned image (PNG, JPEG) is read by the model, or by Tesseract when it is installed.

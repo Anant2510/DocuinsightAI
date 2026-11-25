@@ -193,7 +193,8 @@ INTENTS = {"recommendation": ("recommend", "outcome", "decision", "next step", "
            "evidence": ("missing", "evidence", "provided", "required", "complete", "outstanding"),
            "classification": ("classification", "commodity", "tariff", "code", "heading", "classif"),
            "discrepancy": ("discrepan", "contradict", "mismatch", "inconsisten", "differ", "conflict", "agree"),
-           "timing": ("deadline", "window", "time limit", "in time", "late", "period", "days")}
+           "timing": ("deadline", "window", "time limit", "in time", "late", "period", "days"),
+           "basis": ("why", "basis", "based on", "rests on", "rest on", "standard", "regulation", "article", "provision", "which rule", "what rule", "practice")}
 ALSO = {"sender": "shipper seller exporter", "receiver": "consignee buyer importer", "recipient": "consignee buyer importer", "supplier": "seller exporter manufacturer",
         "customer": "buyer importer consignee", "price": "value amount total", "cost": "value amount total", "paid": "payment amount", "weight": "gross weight",
         "address": "shipper consignee seller buyer", "product": "goods description", "item": "goods description", "size": "diameter width", "when": "date"}
@@ -241,7 +242,8 @@ def retrieve_context(case: dict[str, Any], profile: Profile, question: str) -> d
     def take(rows: list[dict[str, Any]]) -> None:
         for f in rows:
             if f["id"] not in {x["id"] for x in found}:
-                found.append({"kind": "finding", "id": f["id"], "title": f["title"], "status": f["status"], "message": f["message"], "path": f.get("graph_path") or [], "reference": f.get("reference")})
+                found.append({"kind": "finding", "id": f["id"], "title": f["title"], "status": f["status"], "message": f["message"], "path": f.get("graph_path") or [], "reference": f.get("reference"),
+                              "basis": f.get("basis") or []})
 
     fs = a.get("findings") or []
     if "classification" in intents:
@@ -258,6 +260,9 @@ def retrieve_context(case: dict[str, Any], profile: Profile, question: str) -> d
             notes.append("No discrepancy was found between the documents.")
     if "timing" in intents:
         take([f for f in fs if f["family"] == "timing"])
+    if "basis" in intents:   # why a check exists: the findings that need attention and what the knowledge graph says their rules rest on
+        about = [f for f in fs if f.get("basis") and len(words & V.tokens(f["title"])) >= 2]   # the check the question names, else the ones that need attention
+        take(about[:3] or [f for f in fs if f["status"] in ("fail", "missing", "review") and f.get("basis")][:4])
     take([f for f in fs if len(words & V.tokens(f["title"])) >= 2 and f["status"] != "info"][:3])
     found = found[:8]
     ctx_notes = notes
@@ -283,6 +288,14 @@ def ask(case: dict[str, Any], profile: Profile, question: str, model: Any = None
         else:
             text.append(f"[S{n}] {item['doc_name']} page {item['page']} line {item['line']}: {item['text']}")
         sources.append({"n": n, **item})
+    cited_nodes: set[str] = set()
+    for item in ctx["findings"]:   # what the knowledge graph says the rule behind a finding rests on: a source like any other, and it opens the exact node
+        for b in item.get("basis") or []:
+            if len(cited_nodes) < 6 and b["id"] not in cited_nodes and b.get("says"):
+                cited_nodes.add(b["id"])
+                n = len(sources) + 1
+                text.append(f"[S{n}] Knowledge graph, {b['name']}" + (f" ({b['citation']})" if b.get("citation") else "") + f": {b['says']} The check \"{item['title']}\" rests on it.")
+                sources.append({"n": n, "kind": "knowledge", "id": b["id"], "name": b["name"], "citation": b.get("citation") or "", "text": b["says"], "finding": item["id"]})
     rec = ctx.get("recommendation")
     if rec:
         text.append(f"[S{len(sources) + 1}] Recommendation: {rec['label']}. " + " ".join(rec["reasons"][:4]))
@@ -305,7 +318,9 @@ def ask(case: dict[str, Any], profile: Profile, question: str, model: Any = None
         except Exception:
             pass
     top = ctx["findings"][:3] if ctx["intents"] and ctx["findings"] else []
-    parts = list(ctx["notes"]) + [f"{f['title']}: {f['message']}" for f in top]
+    rests = lambda f: (" It rests on " + ", ".join(b["name"] for b in f["basis"][:3]) + ".") if f.get("basis") and "basis" in ctx["intents"] else ""  # noqa: E731
+    stop = lambda t: t if t.rstrip()[-1:] in ".!?" else t.rstrip() + "."  # noqa: E731
+    parts = list(ctx["notes"]) + [f"{f['title']}: {stop(f['message']) if rests(f) else f['message']}{rests(f)}" for f in top]
     if rec and "recommendation" in ctx["intents"]:
         parts.insert(0, f"The recommendation is {rec['label']}." + (" " + " ".join(rec["reasons"][:3]) if rec["reasons"] else ""))
     if not parts and ctx["facts"]:

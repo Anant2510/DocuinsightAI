@@ -49,9 +49,11 @@ SCHEMA = "1.0"
 MAX_IMPORT = 60_000
 DOMAIN = "Document and case intelligence"   # the experience domain every use case of this accelerator belongs to
 ACCELERATOR = "DocuInsights"
-BUILD = 3   # the shape a build writes. 3: KB Forge's four levels in its own level ids, and the company at the head of the cases
+BUILD = 4   # the shape a build writes. 3: KB Forge's four levels in its own level ids, the company at the head of the cases. 4: the curated knowledge bases
+KNOWLEDGE_DIR = Path(__file__).resolve().parent / "foundation" / "knowledge"   # the industry and domain knowledge bases that ship with the accelerator
 LEVEL_ORDER = ("industry", "domain", "solution", "customer")
 ORIGIN_WORDS = {"document": "read in a document", "system": "from the case record", "settings": "declared by a use case", "web": "from a retrieved reference",
+                "curated": "curated reference knowledge", "manual": "added by hand",
                 "imported": "imported knowledge", "inferred": "worked out from other links", "decision": "decided by a person", "unverified": "cited but not found in the text",
                 "unknown": "no source recorded"}
 _locks: dict[str, threading.RLock] = {}
@@ -94,10 +96,16 @@ class Contribution:
         self.texts: dict[str, list[str]] = {}
 
     def entity(self, type_: str, name: Any, *, description: str = "", props: dict[str, Any] | None = None, synonyms: list[str] | None = None, key: str | None = None,
-               support: list[dict[str, Any]] | None = None, confidence: float | None = None, eid: str | None = None, stub: bool = False) -> str:
+               support: list[dict[str, Any]] | None = None, confidence: float | None = None, eid: str | None = None, stub: bool = False, level: str | None = None,
+               depth: int | None = None) -> str:
+        """`level` and `depth` place the entity where this source knows it (an industry's process with the industry); without them its class decides."""
         name = " ".join(str(name).split())[:160] or "unnamed"
         eid = eid or O.entity_id(type_, name)
         e = self.entities.setdefault(eid, {"id": eid, "type": type_, "name": name, "props": {}, "synonyms": [], "support": [], "confidence": _conf(confidence), "key": key, "stub": stub})
+        if level in LEVEL_ORDER:
+            e.setdefault("level", level)
+        if depth:
+            e.setdefault("depth", int(depth))
         if description and not e["props"].get("description"):
             e["props"]["description"] = description
         for k, v in (props or {}).items():
@@ -196,6 +204,240 @@ def profile_contribution(profile: Profile) -> dict[str, Any]:
         c.triple(uc, "usesReferenceSource", c.entity("ReferenceSource", ref.get("name") or ref["id"], description=ref.get("description") or f"Reference read for the date of the {profile.brand.get('case_noun', 'case')}.",
                                                      props={"connector": ref.get("connector")}, support=said(f"reference_sources.{ref['id']}", ref.get("name") or ref["id"])),
                  support=said(f"reference_sources.{ref['id']}", f"{profile.name} reads {ref.get('name') or ref['id']}"))
+    return c.data()
+
+
+# ------------------------------------------------------------------------------------------------ curated knowledge bases
+PACK_SECTIONS = ("bodies", "standards", "practices", "processes", "risks", "kpis", "terms", "challenges", "capabilities")
+
+
+def load_packs(extra: str | Path | None = None, problems: list[str] | None = None) -> list[dict[str, Any]]:
+    """The curated knowledge bases: one YAML file each, an industry's or the domain's. Those shipped with the accelerator, then any in the
+    folder DOCUINSIGHTS_KNOWLEDGE_DIR names (a file there with the id of a shipped one replaces it). A file that cannot be read is
+    left out and said so in `problems`; it never stops the graph from being built."""
+    import os
+
+    import yaml
+
+    packs: dict[str, dict[str, Any]] = {}
+    extra = extra if extra is not None else os.environ.get("DOCUINSIGHTS_KNOWLEDGE_DIR")
+    for folder, shipped in ((KNOWLEDGE_DIR, True), (Path(extra).expanduser() if extra else None, False)):
+        if folder is None or not folder.is_dir():
+            continue
+        for path in sorted(folder.glob("*.y*ml")):
+            try:
+                raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+                if problems is not None:
+                    problems.append(f"{path.name}: could not be read as YAML ({str(exc).splitlines()[0][:160]})")
+                continue
+            if not isinstance(raw, dict) or not raw.get("id") or raw.get("kind") not in ("industry", "domain") or not raw.get("head"):
+                if problems is not None:
+                    problems.append(f"{path.name}: not a knowledge base: it needs an id, a kind (industry or domain) and the head it belongs to")
+                continue
+            raw["id"] = O.slugify(str(raw["id"]), 60)
+            packs[raw["id"]] = {**raw, "file": path.name, "shipped": shipped, "name": str(raw.get("name") or raw["head"]), "version": str(raw.get("version") or "1.0")}
+    return sorted(packs.values(), key=lambda p: (p["kind"] != "industry", p["name"]))
+
+
+def pack_contributions(packs: list[dict[str, Any]], profiles: list[Profile]) -> tuple[list[dict[str, Any]], list[str]]:
+    """Each knowledge base as a contribution to the graph, and what in it could not be resolved (a name it links to that nothing defines).
+    Everything a knowledge base states sits at its level and cites the knowledge base, with the reference of the standard where there is one."""
+    from . import pipeline as P
+
+    problems: list[str] = []
+    rule_of: dict[str, str] = {}   # "<profile>/<group>.<id>" -> the rule's title, which names its node
+    family_of: dict[str, list[str]] = defaultdict(list)
+    use_case = {prof.id: prof.name for prof in profiles}
+    for prof in profiles:
+        for ev in prof.evidence:
+            rule_of[f"{prof.id}/evidence.{ev['id']}"] = f"{ev['title']} " + ("is required" if ev.get("required") == "always" else "is required when it applies")
+            family_of["evidence"].append(rule_of[f"{prof.id}/evidence.{ev['id']}"])
+        for group, label in ((prof.rules, "rules"), (prof.consistency, "consistency")):
+            for r in group:
+                rule_of[f"{prof.id}/{label}.{r['id']}"] = r.get("title") or r["id"]
+                family_of[label].append(rule_of[f"{prof.id}/{label}.{r['id']}"])
+    agent_of = {a["id"]: a["name"] for a in P.AGENTS}
+    built: list[tuple[dict[str, Any], Contribution, Any]] = []
+    names: dict[str, tuple[str, str]] = {}   # a name any knowledge base defines -> (node, class)
+
+    def define(c: Contribution, type_: str, name: str, **kw: Any) -> str:
+        eid = c.entity(type_, name, **kw)
+        names.setdefault(name.strip().lower(), (eid, type_))
+        for other in kw.get("synonyms") or []:
+            names.setdefault(str(other).strip().lower(), (eid, type_))
+        return eid
+
+    for pack in packs:
+        level = "industry" if pack["kind"] == "industry" else "domain"
+        label = f"{pack['name']} v{pack['version']}"
+        c = Contribution("knowledge", pack["id"], pack["name"])
+        c.source.update(level=level, head=pack["head"], version=pack["version"], about=pack.get("about") or "", file=pack.get("file"), shipped=bool(pack.get("shipped")))
+
+        def said(locator: str, text: str, label: str = label) -> list[dict[str, Any]]:
+            return [{"citation": {"kind": "reference", "source": label, "locator": locator, "text": text}, "section": "knowledge", "how": "curated"}]
+
+        head = c.entity("IndustrySegment" if level == "industry" else "ExperienceDomain", pack["head"], description=pack.get("about") or "", support=said("about", pack["head"]))
+        to_head = {"industry": {"Standard": ("standardInIndustry", True), "Regulation": ("regulationInIndustry", True), "BusinessProcess": ("processInIndustry", True), "Risk": ("riskInIndustry", True),
+                                "KPI": ("kpiInIndustry", True), "Term": ("termInIndustry", True), "BestPractice": ("practiceInIndustry", True)},
+                   "domain": {"Standard": ("domainUsesStandard", False), "Regulation": ("domainGovernedBy", False), "KPI": ("domainMeasuredBy", False), "Term": ("domainHasTerm", False),
+                              "BestPractice": ("domainHasBestPractice", False), "Capability": ("domainHasCapability", False), "Challenge": ("domainHasChallenge", False)}}[level]
+
+        def node(type_: str, item: dict[str, Any], where: str, *, props: dict[str, Any] | None = None, depth: int | None = None) -> str:
+            name = str(item["name"])
+            eid = define(c, type_, name, description=str(item.get("says") or ""), props=props, synonyms=[str(x) for x in item.get("also") or []], support=said(f"{where}.{name}", str(item.get("says") or name)),
+                         level=level, depth=depth)
+            link = to_head.get(type_)
+            if link:
+                c.triple(eid if link[1] else head, link[0], head if link[1] else eid, support=said(f"{where}.{name}", f"{name}: {pack['head']}"))
+            return eid
+
+        for b in pack.get("bodies") or []:
+            define(c, "StandardsBody", str(b["name"]), description=str(b.get("says") or ""), synonyms=[str(x) for x in b.get("also") or []], support=said(f"bodies.{b['name']}", str(b.get("says") or b["name"])),
+                   level=level, depth=None if level == "industry" else 4)
+        for st in pack.get("standards") or []:
+            law = str(st.get("type") or "standard").lower() == "regulation"
+            sid = node("Regulation" if law else "Standard", st, "standards", depth=None if level == "industry" else 3,
+                       props={"title": st.get("title"), "jurisdiction": st.get("jurisdiction"), "citation": st.get("cite"), "issuedBy": st.get("by") if law else None})
+            if st.get("by") and not law:
+                c.triple(sid, "publishedBy", define(c, "StandardsBody", str(st["by"]), level=level, depth=None if level == "industry" else 4, support=said(f"standards.{st['name']}", f"published by {st['by']}")),
+                         support=said(f"standards.{st['name']}", f"{st['name']} is published by {st['by']}"))
+            for pv in st.get("provisions") or []:
+                cite = f"{st.get('cite') or st['name']}, {pv['ref']}"
+                short = f"{st['name']} {pv['ref']}"   # the name says what the article is about: two paragraphs of one article are two nodes in KB Forge too, which drops brackets when it compares names
+                pid = define(c, "Provision", f"{short}: {pv['about']}" if pv.get("about") else short, description=str(pv.get("says") or ""), props={"reference": pv["ref"], "citation": cite}, level=level,
+                             depth=None if level == "industry" else 4,
+                             support=[{"citation": {"kind": "reference", "source": label, "locator": cite, "text": str(pv.get("says") or "")}, "section": "knowledge", "how": "curated"}])
+                names.setdefault(short.strip().lower(), (pid, "Provision"))   # a knowledge base may name it by its reference alone
+                c.triple(pid, "provisionOf", sid, support=said(f"standards.{st['name']}", f"{pv['ref']} of {st['name']}"))
+        for pr in pack.get("practices") or []:
+            node("BestPractice", pr, "practices", props={"rationale": pr.get("why")})
+        for pr in pack.get("processes") or []:
+            node("BusinessProcess", pr, "processes", props={"steps": [str(x) for x in pr.get("steps") or []]}, depth=2 if level == "industry" else None)
+        for r in pack.get("risks") or []:
+            node("Risk", r, "risks", props={"signs": [str(x) for x in r.get("signs") or []], "checkedHere": str(r["checked"]) if r.get("checked") else None})
+        for k in pack.get("kpis") or []:
+            node("KPI", k, "kpis", props={"formula": k.get("formula"), "unit": k.get("unit"), "direction": {"lower": "lower is better", "higher": "higher is better"}.get(str(k.get("better") or ""))})
+        for t in pack.get("terms") or []:
+            node("Term", t, "terms")
+        for ch in pack.get("challenges") or []:
+            node("Challenge", ch, "challenges", props={"impact": ch.get("impact")})
+        for cp in pack.get("capabilities") or []:
+            node("Capability", cp, "capabilities")
+        built.append((pack, c, said))
+
+    def find(ref: Any, pack: dict[str, Any], where: str) -> tuple[str, str] | None:
+        ref = str(ref).strip()
+        if ref.startswith("rule:"):
+            title = rule_of.get(ref[5:])
+            if title:
+                return title, "PolicyRule"   # the caller names the rule in its own contribution, as a stub the use case then fills
+        elif ref.lower() in names:
+            return names[ref.lower()]
+        problems.append(f"{pack['id']}: {where} names '{ref}', which no knowledge base or use case defines")
+        return None
+
+    for pack, c, said in built:
+        level = "industry" if pack["kind"] == "industry" else "domain"
+
+        def link(src: str, predicate: str, refs: Any, where: str, *, reverse: bool = False, only: tuple[str, ...] = (), by_type: dict[str, str] | None = None) -> None:
+            for ref in refs or []:
+                got = find(ref, pack, where)
+                if not got:
+                    continue
+                p = (by_type or {}).get(got[1], predicate)
+                if only and got[1] not in only:
+                    problems.append(f"{pack['id']}: {where} links '{ref}' ({got[1]}) where one of {', '.join(only)} is expected")
+                    continue
+                other = c.entity("PolicyRule", got[0], stub=True) if str(ref).startswith("rule:") else got[0]
+                c.triple(other if reverse else src, p, src if reverse else other, support=said(where, f"{where}: {ref}"))
+
+        me = lambda name: names[str(name).strip().lower()][0]  # noqa: E731
+        for pr in pack.get("processes") or []:
+            where = f"processes.{pr['name']}"
+            link(me(pr["name"]), "conformsToStandard", pr.get("under"), where, only=("Standard", "Regulation"), by_type={"Regulation": "governedByRegulation"})
+            link(me(pr["name"]), "processMeasuredBy", pr.get("measures"), where, only=("KPI",))
+            for doc in pr.get("documents") or []:   # a kind of document a use case declares, or one only this knowledge base names
+                c.triple(me(pr["name"]), "processUsesDocument", c.entity("Document", str(doc), stub=True), support=said(where, f"{pr['name']} works with {doc}"))
+            for pid in pr.get("use_cases") or []:
+                if pid in use_case:
+                    c.triple(c.entity("UseCase", use_case[pid], stub=True), "useCaseWithinProcess", me(pr["name"]), support=said(where, f"the use case is one step of {pr['name']}"))
+                else:
+                    problems.append(f"{pack['id']}: {where} names the use case '{pid}', which is not installed")
+        for r in pack.get("risks") or []:
+            where = f"risks.{r['name']}"
+            link(me(r["name"]), "affectsProcess", r.get("affects"), where, only=("BusinessProcess",))
+            link(me(r["name"]), "riskCheckedBy", r.get("caught_by"), where)
+            link(me(r["name"]), "indicatedByKPI", r.get("measures"), where, only=("KPI",))
+        for pr in pack.get("practices") or []:
+            where = f"practices.{pr['name']}"
+            link(me(pr["name"]), "practiceGuardsAgainst", pr.get("guards"), where, only=("Risk",))
+            link(me(pr["name"]), "challengeAddressedBy", pr.get("answers"), where, reverse=True, only=("Challenge",))
+        for cp in pack.get("capabilities") or []:
+            where = f"capabilities.{cp['name']}"
+            link(me(cp["name"]), "challengeAnsweredBy", cp.get("answers"), where, reverse=True, only=("Challenge",))
+            for aid in cp.get("agents") or []:
+                if aid in agent_of:
+                    c.triple(me(cp["name"]), "capabilityDeliveredBy", c.entity("SoftwareAgent", agent_of[aid], stub=True), support=said(where, f"{cp['name']} is delivered by {agent_of[aid]}"))
+                else:
+                    problems.append(f"{pack['id']}: {where} names the agent '{aid}', which does not exist")
+        for pid, rules in (pack.get("basis") or {}).items():   # why each rule of a use case exists: the path from a finding to a standard
+            for key, refs in (rules or {}).items():
+                title = rule_of.get(f"{pid}/{key}")
+                if not title:
+                    if pid in use_case:
+                        problems.append(f"{pack['id']}: basis names the rule '{pid}/{key}', which the use case does not have")
+                    continue
+                link(c.entity("PolicyRule", title, stub=True), "ruleBasedOn", refs, f"basis.{pid}.{key}")
+        for family, refs in (pack.get("basis_by_family") or {}).items():
+            for title in dict.fromkeys(family_of.get(family) or []):
+                link(c.entity("PolicyRule", title, stub=True), "ruleBasedOn", refs, f"basis.{family}")
+    return [c.data() for _, c, _ in built], problems
+
+
+# What can be added by hand under a node of each kind: (the kind of the new thing, the link, which way it points, how the choice reads).
+ATTACH: dict[str, list[tuple[str, str, str, str]]] = {
+    "IndustrySegment": [("Standard", "standardInIndustry", "out", "A standard used in {name}"), ("Regulation", "regulationInIndustry", "out", "A regulation that applies in {name}"),
+                        ("BestPractice", "practiceInIndustry", "out", "A practice or control used in {name}"), ("Risk", "riskInIndustry", "out", "A risk met in {name}"),
+                        ("BusinessProcess", "processInIndustry", "out", "A process run in {name}"), ("KPI", "kpiInIndustry", "out", "A measure used in {name}"), ("Term", "termInIndustry", "out", "A term of {name}")],
+    "ExperienceDomain": [("BestPractice", "domainHasBestPractice", "in", "A practice of the domain"), ("Capability", "domainHasCapability", "in", "A capability of the domain"),
+                         ("Challenge", "domainHasChallenge", "in", "A challenge the domain answers"), ("KPI", "domainMeasuredBy", "in", "A measure of the domain"),
+                         ("Term", "domainHasTerm", "in", "A term of the domain"), ("Standard", "domainUsesStandard", "in", "A standard the domain uses"), ("Regulation", "domainGovernedBy", "in", "A regulation the domain is governed by")],
+    "Standard": [("Provision", "provisionOf", "out", "An article or provision of {name}")],
+    "Regulation": [("Provision", "provisionOf", "out", "An article or provision of {name}")],
+    "PolicyRule": [("Provision", "ruleBasedOn", "in", "A provision this rule rests on"), ("BestPractice", "ruleBasedOn", "in", "A practice this rule rests on"), ("Term", "ruleBasedOn", "in", "A term this rule applies")],
+    "BusinessProcess": [("Risk", "affectsProcess", "out", "A risk to this process"), ("KPI", "processMeasuredBy", "in", "A measure of this process"), ("Document", "processUsesDocument", "in", "A kind of document this process uses")],
+    "Risk": [("BestPractice", "practiceGuardsAgainst", "out", "A practice that guards against this risk"), ("KPI", "indicatedByKPI", "in", "A measure that shows this risk")],
+    "Challenge": [("BestPractice", "challengeAddressedBy", "in", "A practice that addresses this challenge")],
+}
+
+
+def name_clashes(entities: Any, limit: int = 12) -> list[str]:
+    """Curated or hand-added things of one kind whose names KB Forge would read as the same name (it drops brackets and small words when it
+    compares names, so 'article 14(a)' and 'article 14(c)' are one node to it). Each needs a name that says what it is about."""
+    seen: dict[tuple[str, str], str] = {}
+    out = []
+    for e in sorted(entities, key=lambda e: e["id"]):
+        if not any(str(m).startswith(("knowledge", "manual")) for m in e.get("sourceModules") or []):
+            continue
+        key = (e["type"], O.normalize_name(e["name"]))
+        if key in seen and len(out) < limit:
+            out.append(f"'{seen[key]}' and '{e['name']}' ({e['type']}) read as one name once brackets are dropped, and KB Forge would join them: say in each name what it is about")
+        seen.setdefault(key, e["name"])
+    return out
+
+
+def manual_contribution(fact: dict[str, Any]) -> dict[str, Any]:
+    """One fact a person added by hand: a named thing of a class, at a level, with what they cite for it and what it is linked to."""
+    c = Contribution("manual", str(fact["id"]), str(fact["name"]), at=str(fact.get("at") or ""))
+    c.source.update(by=fact.get("by"), level=fact.get("level"))
+    why = [{"citation": {"kind": "manual", "source": f"added by {fact.get('by') or 'a person'}", "locator": str(fact.get("at") or "")[:10], "text": str(fact.get("source") or fact.get("description") or fact["name"])},
+            "section": "manual", "how": "stated"}]
+    eid = c.entity(str(fact["type"]), fact["name"], description=str(fact.get("description") or ""), props={"citation": fact.get("source")}, support=why, level=fact.get("level"), depth=fact.get("depth"))
+    for ln in fact.get("links") or []:
+        if ln.get("to"):
+            ends = (str(ln["to"]), eid) if ln.get("direction") == "in" else (eid, str(ln["to"]))
+            c.triple(ends[0], str(ln.get("relation") or "relatedTo"), ends[1], support=why)
     return c.data()
 
 
@@ -519,7 +761,7 @@ def build(contributions: list[dict[str, Any]], onto: O.Ontology | None = None) -
 
     for contrib in contributions:
         src = contrib["source"]
-        module = {"profile": f"profile:{src['id']}", "case": "case", "import": f"import:{src['id']}"}.get(src["kind"], src["kind"])
+        module = {"profile": f"profile:{src['id']}", "case": "case", "import": f"import:{src['id']}", "knowledge": f"knowledge:{src['id']}"}.get(src["kind"], src["kind"])
         if src["kind"] == "import" and src.get("placed") in LEVEL_ORDER:
             placed[module] = src["placed"]
         stats.setdefault(module, {"entities": 0, "triples": 0})
@@ -552,10 +794,15 @@ def build(contributions: list[dict[str, Any]], onto: O.Ontology | None = None) -
             if cur is None:
                 cur = ents[eid] = {"id": eid, "type": e["type"], "name": e["name"], "props": {}, "synonyms": [], "sourceModules": [], "confidence": None, "stub": bool(e.get("stub"))}
                 stats[module]["entities"] += 1
-            elif cur["type"] != e["type"] and onto.is_a(e["type"], cur["type"]):
+            elif cur["type"] != e["type"] and (onto.is_a(e["type"], cur["type"]) or cur.get("_guessed")):
                 cur["type"] = e["type"]   # the more specific class wins; the id keeps the class it was first created under
+            cur.pop("_guessed", None)
             if not e.get("stub"):
                 cur["stub"] = False
+            if e.get("level") and e["level"] not in cur.setdefault("_levels", []):   # where each source that says so places it: the first is where it is shown
+                cur["_levels"].append(e["level"])
+            if e.get("depth") and not cur.get("_depth"):
+                cur["_depth"] = e["depth"]
             for k, v in (e.get("props") or {}).items():
                 if k not in cur["props"] or (src["kind"] == "case" and k not in ("description",)):
                     cur["props"][k] = v
@@ -572,7 +819,7 @@ def build(contributions: list[dict[str, Any]], onto: O.Ontology | None = None) -
             for end in (s, o):
                 if end not in ents:   # a link to something no source defines: kept as a stub, the best target for enrichment
                     ents[end] = {"id": end, "type": O.pascal(end.split("/")[0]) if "/" in end else "Thing", "name": end.split("/")[-1].replace("-", " "), "props": {}, "synonyms": [],
-                                 "sourceModules": [module], "confidence": None, "stub": True}
+                                 "sourceModules": [module], "confidence": None, "stub": True, "_guessed": True}
             if s == o:
                 continue
             if p not in onto.relationships:
@@ -630,12 +877,15 @@ def build(contributions: list[dict[str, Any]], onto: O.Ontology | None = None) -
         # that knowledge base, else at the level KB Forge recorded on the entity itself (a combined graph says it entity by entity), and keeps
         # the depth it came with. No level at all: added knowledge.
         came = O.kb_forge_levels(e["props"].get("knowledgeLevel"))
+        hinted, deep = e.pop("_levels", None) or [], e.pop("_depth", None)
+        e.pop("_guessed", None)
         if _added(e):
             home = next((placed[m] for m in e["sourceModules"] if m in placed), "")
         else:
-            home = onto.level(e["type"]) or "customer"
-            if onto.depth(e["type"]):
-                e["props"]["graphLevel"] = onto.depth(e["type"])
+            home = (hinted[0] if hinted else None) or onto.level(e["type"]) or "customer"
+            came = [*(O.KB_FORGE_ID[x] for x in hinted[1:]), *came]   # also known at these levels
+            if deep or onto.depth(e["type"]):
+                e["props"]["graphLevel"] = deep or onto.depth(e["type"])
         first = [O.KB_FORGE_ID[home]] if home else []
         e["props"]["knowledgeLevel"] = first + [x for x in came if x not in first]
     return {"entities": ents, "triples": trips, "citations": cits, "entity_support": dict(esup), "triple_support": dict(tsup), "documents": documents, "texts": texts,
@@ -752,7 +1002,8 @@ def verify(g: dict[str, Any]) -> dict[str, Any]:
 
 
 def _first_origin(kinds: set[str]) -> str:
-    for kind, origin in (("record", "system"), ("profile", "settings"), ("web", "web"), ("decision", "decision"), ("import", "imported"), ("inferred", "inferred")):
+    for kind, origin in (("record", "system"), ("profile", "settings"), ("web", "web"), ("decision", "decision"), ("reference", "curated"), ("manual", "manual"), ("import", "imported"),
+                         ("inferred", "inferred")):
         if kind in kinds:
             return origin
     return "unknown"
@@ -835,6 +1086,129 @@ class KnowledgeBase:
                 continue
         return out
 
+    def settings(self) -> dict[str, Any]:
+        try:
+            return {"off": [], **json.loads((self.root / "settings.json").read_text(encoding="utf-8"))}
+        except (OSError, ValueError):
+            return {"off": []}
+
+    def switch(self, pack_id: str, on: bool) -> dict[str, Any]:
+        """Switch one of the curated knowledge bases on or off. Off, nothing it states is in the graph; its file is untouched."""
+        if pack_id not in {p["id"] for p in load_packs()}:
+            raise KeyError(f"no knowledge base '{pack_id}'")
+        cfg = self.settings()
+        cfg["off"] = sorted({*cfg["off"], pack_id} - ({pack_id} if on else set()))
+        self._write(self.root / "settings.json", json.dumps(cfg, indent=1))
+        return cfg
+
+    def knowledge_bases(self) -> list[dict[str, Any]]:
+        """Every knowledge base behind the graph, as one list to manage: the curated ones, the added ones, what was added by hand, and the cases."""
+        off = set(self.settings()["off"])
+        stats = {}
+        try:
+            stats = json.loads((self.root / "graph" / "module_stats.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+        out = []
+        for p in load_packs():
+            got = stats.get(f"knowledge:{p['id']}") or {}
+            out.append({"id": p["id"], "kind": "curated", "name": p["name"], "level": "industry" if p["kind"] == "industry" else "domain", "head": p["head"], "version": p["version"], "about": p.get("about") or "",
+                        "head_id": O.entity_id("IndustrySegment" if p["kind"] == "industry" else "ExperienceDomain", p["head"]),
+                        "on": p["id"] not in off, "shipped": bool(p.get("shipped")), "file": p.get("file"), "entities": got.get("entities", 0), "relationships": got.get("triples", 0),
+                        "states": {k: len(p.get(k) or []) for k in PACK_SECTIONS if p.get(k)} | ({"provisions": sum(len(st.get("provisions") or []) for st in p.get("standards") or [])} if p.get("standards") else {})})
+        for imp in self.imports():
+            out.append({"id": imp["id"], "kind": "added", "name": imp["label"], "level": imp.get("placed") or "", "level_name": imp["level_name"], "on": True, "entities": imp["entities"],
+                        "relationships": imp["relationships"], "app": imp.get("app"), "at": imp.get("imported_at"), "own_levels": imp.get("own_levels", 0)})
+        for gone in sorted(self._src("imports").glob("*.removed")) if self._src("imports").is_dir() else []:
+            try:
+                src = json.loads(gone.read_text(encoding="utf-8"))["source"]
+                out.append({"id": src["id"], "kind": "added", "name": src["label"], "level": src.get("placed") or "", "on": False, "entities": 0, "relationships": 0, "app": src.get("app"), "at": src.get("imported_at")})
+            except (OSError, ValueError, KeyError):
+                continue
+        return out
+
+    def place_import(self, sid: str, level: str) -> dict[str, Any]:
+        """Move an added knowledge base to another level ('' = each entity at the level it came with)."""
+        path = self._src("imports") / f"{O.slugify(sid, 120)}.json"
+        if not path.exists():
+            raise KeyError(f"no added knowledge base '{sid}'")
+        if level and level not in LEVEL_ORDER:
+            raise ValueError(f"'{level}' is not a level: {', '.join(LEVEL_ORDER)}")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["source"]["placed"] = level
+        self._write(path, json.dumps(data, ensure_ascii=False))
+        return data["source"]
+
+    def restore_source(self, kind: str, sid: str) -> bool:
+        path = self._src(kind) / f"{O.slugify(sid, 120)}.removed"
+        if not path.exists():
+            return False
+        path.rename(path.with_suffix(".json"))
+        return True
+
+    def add_fact(self, fact: dict[str, Any], by: str = "caseworker") -> dict[str, Any]:
+        """A fact added by hand: a named thing of a class at a level, linked to what it belongs to, with what the person cites for it."""
+        name = " ".join(str(fact.get("name") or "").split())[:160]
+        type_ = O.pascal(str(fact.get("type") or "Term")) or "Term"
+        if not name:
+            raise ValueError("a fact needs a name")
+        level = str(fact.get("level") or "")
+        if level and level not in LEVEL_ORDER:
+            raise ValueError(f"'{level}' is not a level: {', '.join(LEVEL_ORDER)}")
+        d = self.load()
+        known = d["entities"]
+        classes = {c["name"]: c for c in d["ontology"]["classes"]}
+        if type_ not in classes:
+            raise ValueError(f"'{type_}' is not a kind of thing in the ontology")
+        onto = O.load()
+        links = [{"to": str(ln["to"]), "relation": O.camel(str(ln.get("relation") or "relatedTo")) or "relatedTo", "direction": "in" if ln.get("direction") == "in" else "out"} for ln in fact.get("links") or [] if ln.get("to")]
+        if not links:
+            raise ValueError("a fact is added under a node of the graph: say what it belongs to")
+        for ln in links:
+            if ln["to"] not in known:
+                raise ValueError(f"'{ln['to']}' is not in the knowledge graph")
+            ends = (known[ln["to"]]["type"], type_) if ln["direction"] == "in" else (type_, known[ln["to"]]["type"])
+            if ln["relation"] in onto.relationships and not onto.fits(ln["relation"], *ends):
+                raise ValueError(f"the ontology has no link '{ln['relation']}' from {ends[0]} to {ends[1]}")
+        under = known[links[0]["to"]]
+        depth = None
+        if under["type"] != "PolicyRule":   # it hangs below what it was added under: at that node's level where that node heads or defines one, and one step deeper
+            if not level and under["type"] in ("IndustrySegment", "ExperienceDomain", "Standard", "Regulation") and level_of(under) in LEVEL_ORDER:
+                level = level_of(under)
+            if depth_of(under) < 99 and (onto.depth(type_) or 99) <= depth_of(under):
+                depth = depth_of(under) + 1
+        twin = next((e["name"] for e in known.values() if e["type"] == type_ and e["id"] != O.entity_id(type_, name) and O.normalize_name(e["name"]) == O.normalize_name(name)), None)
+        if twin:   # KB Forge drops brackets and small words when it compares names: these two would be one node there
+            raise ValueError(f"'{name}' reads as the same name as '{twin}' once brackets are dropped. Say what it is about, for example '{name}: its subject'.")
+        fid = O.slugify(f"{type_}-{name}", 100)
+        before = next((f for f in self.facts() if f["id"] == fid), None)
+        if before:   # the same thing added under a second node: one fact with both links
+            links = [*before.get("links", []), *(ln for ln in links if ln not in before.get("links", []))]
+        rec = {"id": fid, "name": name, "type": type_, "level": level or (before or {}).get("level") or None, "depth": depth or (before or {}).get("depth"),
+               "description": str(fact.get("description") or (before or {}).get("description") or "")[:1200], "source": str(fact.get("source") or (before or {}).get("source") or "")[:400],
+               "links": links, "by": by, "at": now()}
+        self.put_source("manual", rec["id"], {**manual_contribution(rec), "fact": rec})
+        return {**rec, "entity": O.entity_id(type_, name)}
+
+    def facts(self) -> list[dict[str, Any]]:
+        return [{**s.get("fact", {}), "entity": O.entity_id(s["fact"]["type"], s["fact"]["name"])} for s in self.sources("manual") if s.get("fact")]
+
+    def attach_options(self, eid: str) -> list[dict[str, Any]]:
+        """What a person may add under this node: the kinds of thing the ontology links to a node of its kind."""
+        d = self.load()
+        e = d["entities"].get(eid)
+        if e is None:
+            raise KeyError(f"no entity '{eid}' in the knowledge base")
+        onto = O.load()
+        out = []
+        kind = next((k for k in [e["type"], *onto.ancestors(e["type"])] if k in ATTACH), None)   # its own kind, else the nearest kind it is one of
+        if kind:
+            for type_, relation, direction, reads in ATTACH[kind]:
+                ends = (e["type"], type_) if direction == "in" else (type_, e["type"])
+                if onto.fits(relation, *ends) and not any(o["type"] == type_ and o["relation"] == relation for o in out):
+                    out.append({"type": type_, "relation": relation, "direction": direction, "label": reads.format(name=e["name"]), "definition": (onto.classes.get(type_) or {}).get("definition") or ""})
+        return out
+
     def imports(self) -> list[dict[str, Any]]:
         return [{**s["source"], "entities": len(s["entities"]), "relationships": len(s["triples"]), "level_name": O.LEVELS.get(s["source"].get("placed") or "", "Each entity at its own level" if s["source"].get("own_levels") else "No level yet")} for s in self.sources("imports")]
 
@@ -876,8 +1250,14 @@ class KnowledgeBase:
     # ---- building
     def rebuild(self, profiles: list[Profile]) -> dict[str, Any]:
         with self._lock:
-            contribs = [foundation_contribution(profiles), *(profile_contribution(p) for p in profiles)]
+            off = set(self.settings()["off"])
+            unread: list[str] = []
+            curated, problems = pack_contributions([p for p in load_packs(problems=unread) if p["id"] not in off], profiles)
+            problems = [*unread, *problems]
+            # the curated knowledge bases come before the use cases: what they say of an industry is its description; a use case then adds its own
+            contribs = [foundation_contribution(profiles), *curated, *(profile_contribution(p) for p in profiles)]
             contribs += sorted(self.sources("cases"), key=lambda s: (s["source"].get("at") or "", s["source"]["id"]))
+            contribs += [{k: v for k, v in s.items() if k != "fact"} for s in self.sources("manual")]
             contribs += self.sources("imports")
             g = build(contribs)
             ver = verify(g)
@@ -885,7 +1265,8 @@ class KnowledgeBase:
             onto: O.Ontology = g["ontology"]
             ents = sorted(g["entities"].values(), key=lambda e: e["id"])
             trips = sorted(g["triples"].values(), key=lambda t: (t["subject"], t["predicate"], t["object"]))
-            index = {"entities": len(ents), "triples": len(trips), "stubs": sum(1 for e in ents if e["stub"]),
+            problems += name_clashes(ents)
+            index = {"entities": len(ents), "triples": len(trips), "stubs": sum(1 for e in ents if e["stub"]), "knowledge_problems": problems[:40],
                      "byType": dict(Counter(e["type"] for e in ents).most_common()), "byPredicate": dict(Counter(t["predicate"] for t in trips).most_common()),
                      "byLevel": dict(Counter(level_of(e) for e in ents)), "built_at": now(), "build": BUILD}
             prov = {"version": 1, "stats": {"entities": len(ents), "relationships": len(trips), "citations": len(g["citations"]), "documents": len(g["documents"]),
@@ -954,9 +1335,10 @@ class KnowledgeBase:
         return {"name": self.name, "built": self.built(), "index": d["index"], "quality": d["quality"], "verification": prov.get("verification") or {}, "stats": prov.get("stats") or {},
                 "origin_words": ORIGIN_WORDS, "levels": self.levels(d), "classes": [{"name": c["name"], "parent": c.get("parent"), "definition": c.get("definition"), "level": c.get("knowledgeLevel"), "depth": class_level.get(c["name"]), "source": c.get("source"),
                                                                            "count": d["index"]["byType"].get(c["name"], 0)} for c in onto["classes"]],
-                "relationships": [{"name": r["name"], "domain": r["domain"], "range": r["range"], "definition": r.get("definition"), "source": r.get("source"), "count": d["index"]["byPredicate"].get(r["name"], 0)}
+                "relationships": [{"name": r["name"], "domain": r["domain"], "range": r["range"], "inverse": r.get("inverse") or "", "definition": r.get("definition"), "source": r.get("source"), "count": d["index"]["byPredicate"].get(r["name"], 0)}
                                   for r in onto["relationships"]],
                 "sources": {"cases": len(self.sources("cases")), "imports": self.imports(), "documents": len(prov.get("documents") or [])},
+                "knowledge_bases": self.knowledge_bases(), "facts": self.facts(),
                 "known": [{"id": e["id"], "type": e["type"], "name": e["name"], "cases": e["props"].get("seenInCases") or 0} for e in top if e["props"].get("seenInCases")],
                 "format": {"name": "KB Forge knowledge base", "schemaVersion": SCHEMA}}
 
@@ -974,16 +1356,201 @@ class KnowledgeBase:
                         "entities": len(members), "heads": len(heads), "classes": Counter(e["type"] for e in members).most_common(8)})
         return out
 
-    def level_map(self, open_levels: list[str] | None = None, drilled: list[str] | None = None, cap: int = 30) -> dict[str, Any]:
+    def _links(self, d: dict[str, Any]) -> tuple[dict[str, set[str]], dict[str, list[tuple[str, str]]]]:
+        """Who is linked to whom, and every link by its kind, worked out once for each build that is loaded."""
+        if "_adj" not in d:
+            adj: dict[str, set[str]] = defaultdict(set)
+            by: dict[str, list[tuple[str, str]]] = defaultdict(list)
+            for t in d["triples"]:
+                adj[t["subject"]].add(t["object"])
+                adj[t["object"]].add(t["subject"])
+                by[t["predicate"]].append((t["subject"], t["object"]))
+            d["_adj"], d["_by"] = adj, by
+        return d["_adj"], d["_by"]
+
+    def _brief(self, d: dict[str, Any], eid: str) -> dict[str, Any]:
+        e = d["entities"][eid]
+        return {"id": eid, "name": e["name"], "type": e["type"], "level": level_of(e)}
+
+    def trail(self, eid: str) -> list[str]:
+        """The way down to a node: from the head of a level, through what it sits under, to the node itself. The shortest such way, ending
+        in the node's own level where there is a choice. This is what the level map opens to show exactly this node."""
+        d = self.load()
+        ents = d["entities"]
+        if eid not in ents:
+            raise KeyError(f"no entity '{eid}' in the knowledge base")
+        adj, _ = self._links(d)
+        order = {k: i for i, k in enumerate((*LEVEL_ORDER, "added"))}
+        top: dict[str, int] = {}
+        for e in ents.values():
+            top[level_of(e)] = min(top.get(level_of(e), 99), depth_of(e))
+        is_head = lambda x: depth_of(ents[x]) < 99 and depth_of(ents[x]) == top[level_of(ents[x])]  # noqa: E731
+
+        def search(upward: bool) -> list[str]:
+            prev: dict[str, str | None] = {eid: None}
+            dist = {eid: 0}
+            queue, found = [eid], []
+            while queue:
+                x = queue.pop(0)
+                if found and dist[x] > dist[found[0]]:
+                    break
+                if is_head(x):
+                    found.append(x)
+                    continue
+                for n in sorted((n for n in adj[x] if not upward or depth_of(ents[n]) < depth_of(ents[x])), key=lambda n: (level_of(ents[n]) != level_of(ents[x]), -depth_of(ents[n]), ents[n]["name"])):
+                    if n not in prev:
+                        prev[n], dist[n] = x, dist[x] + 1
+                        queue.append(n)
+            if not found:
+                return []
+            x: str | None = min(found, key=lambda h: (level_of(ents[h]) != level_of(ents[eid]), order[level_of(ents[h])], ents[h]["name"]))
+            path = []
+            while x is not None:
+                path.append(x)
+                x = prev[x]
+            return path
+
+        return search(True) or search(False) or [eid]
+
+    IN_INDUSTRY = ("standardInIndustry", "regulationInIndustry", "practiceInIndustry", "termInIndustry", "riskInIndustry", "kpiInIndustry", "processInIndustry")
+
+    def _industries(self, d: dict[str, Any]) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+        """The industries a piece of knowledge belongs to (none means it holds everywhere), and the industries each case was assessed in."""
+        if "_ind" not in d:
+            _, by = self._links(d)
+            home: dict[str, set[str]] = defaultdict(set)
+            for p in self.IN_INDUSTRY:
+                for s, o in by.get(p, []):
+                    home[s].add(o)
+            for s, o in by.get("provisionOf", []):
+                home[s] |= home.get(o, set())
+            serves: dict[str, set[str]] = defaultdict(set)
+            for s, o in by.get("useCaseServesIndustry", []):
+                serves[s].add(o)
+            cases: dict[str, set[str]] = defaultdict(set)
+            for s, o in by.get("caseOfUseCase", []):
+                cases[s] |= serves.get(o, set())
+            d["_ind"] = (home, cases)
+        return d["_ind"]
+
+    def way_to(self, eid: str) -> list[dict[str, Any]]:
+        d = self.load()
+        return [self._brief(d, x) for x in self.trail(eid)]
+
+    def basis(self, rule_id: str, case_id: str | None = None, *, within: set[str] | None = None) -> list[dict[str, Any]]:
+        """Why a rule exists: the provisions, practices and terms it rests on, each with the standard it belongs to and the industry that uses
+        it. One rule can serve two industries and rest on a different text in each; for a case (or within the industries given) only the
+        texts of its own industry are given."""
+        d = self.load()
+        ents = d["entities"]
+        _, by = self._links(d)
+        home, cases = self._industries(d)
+        owner = {s: o for s, o in by.get("provisionOf", [])}
+        within = within if within is not None else cases.get(case_id or "", set())
+        out = []
+        for s, o in by.get("ruleBasedOn", []):
+            if s != rule_id or o not in ents or (within and home.get(o) and not home[o] & within):
+                continue
+            e = ents[o]
+            item = {**self._brief(d, o), "says": e["props"].get("description") or "", "citation": e["props"].get("citation") or "",
+                    "industries": sorted(ents[i]["name"] for i in home.get(o, ()) if i in ents)}
+            if o in owner and owner[o] in ents:
+                item["of"] = self._brief(d, owner[o])
+                item["jurisdiction"] = ents[owner[o]]["props"].get("jurisdiction") or ""
+            out.append(item)
+        return sorted(out, key=lambda x: (x["type"] != "Provision", x["type"], x["name"]))
+
+    def usage(self, eid: str) -> dict[str, Any]:
+        """Where a node is used: the rules that rest on it, the findings those rules produced and the cases they were produced on."""
+        d = self.load()
+        ents = d["entities"]
+        _, by = self._links(d)
+        if eid not in ents:
+            raise KeyError(f"no entity '{eid}' in the knowledge base")
+        kind = ents[eid]["type"]
+        rules = {eid} if kind == "PolicyRule" else {s for s, o in by.get("ruleBasedOn", []) if o == eid}
+        parts = {s for s, o in by.get("provisionOf", []) if o == eid}
+        rules |= {s for s, o in by.get("ruleBasedOn", []) if o in parts}
+        rules |= {o for s, o in by.get("riskCheckedBy", []) if s == eid and ents[o]["type"] == "PolicyRule"}
+        if kind == "UseCase":
+            rules |= {o for s, o in by.get("governedByRegulation", []) if s == eid}
+        if kind == "SoftwareAgent":
+            findings = {s for s, o in by.get("findingProducedByAgent", []) if o == eid}
+        elif kind == "CaseFinding":
+            findings = {eid}
+        else:
+            findings = {s for s, o in by.get("findingAppliesRule", []) if o in rules}
+        case_of = {o: s for s, o in by.get("caseHasFinding", [])}
+        home, where = self._industries(d)
+        if home.get(eid):   # a standard of one industry is not used by a case of another, even where both apply a rule of the same name
+            findings = {f for f in findings if where.get(case_of.get(f, ""), set()) & home[eid]}
+        status = Counter(str(ents[f]["props"].get("status") or "") for f in findings)
+        cases: dict[str, dict[str, Any]] = {}
+        for f in findings:
+            cid = case_of.get(f)
+            if cid in ents:
+                row = cases.setdefault(cid, {"id": cid, "name": ents[cid]["name"], "outcome": ents[cid]["props"].get("outcomeLabel") or "", "findings": []})
+                row["findings"].append({"id": f, "name": ents[f]["name"].split(" \u2014 ")[0], "status": ents[f]["props"].get("status") or ""})
+        return {"rules": [self._brief(d, r) for r in sorted(rules - {eid}, key=lambda r: ents[r]["name"])][:40], "findings": len(findings), "by_status": dict(status),
+                "cases": sorted(cases.values(), key=lambda c: c["name"])[:30]}
+
+    def case_knowledge(self, case: dict[str, Any]) -> dict[str, Any]:
+        """A case seen from the graph: for each finding its own node, the rule it applied and what that rule rests on; and what the graph
+        already knew that the case was told about."""
+        d = self.load()
+        ents = d["entities"]
+        a = case.get("assessment") or {}
+        ref = case["reference"]
+        names = {}
+        for e in ents.values():
+            if e["type"] in ("Organization", "Company"):
+                for n in [e["name"], *e.get("synonyms", [])]:
+                    names.setdefault(O.normalize_name(n), e["id"])
+        practice = O.entity_id("BestPractice", "Duplicate detection across cases")
+        case_node = O.entity_id("Case", ref)
+        findings: dict[str, Any] = {}
+        used: dict[str, dict[str, Any]] = {}
+        for f in a.get("findings") or []:
+            node = O.entity_id("CaseFinding", f"{f['title']} \u2014 {ref}")
+            rule = O.entity_id("PolicyRule", f["rule"]["title"]) if (f.get("rule") or {}).get("title") else None
+            row: dict[str, Any] = {"node": node if node in ents else None, "rule": self._brief(d, rule) if rule in ents else None, "basis": self.basis(rule, case_node) if rule in ents else [], "known": []}
+            mem = (f.get("data") or {}).get("memory") or {}
+            if mem.get("value"):
+                eid = O.entity_id("Identifier", f"{mem.get('type')} {mem['value']}")
+                if eid in ents:
+                    row["known"].append({**self._brief(d, eid), "cases": mem.get("count") or len(mem.get("cases") or [])})
+            for party in mem.get("parties") or []:
+                eid = names.get(O.normalize_name(party.get("name") or ""))
+                if eid:
+                    row["known"].append({**self._brief(d, eid), "cases": party.get("count") or len(party.get("cases") or [])})
+            if mem and practice in ents:
+                row["basis"] = [{**self._brief(d, practice), "says": ents[practice]["props"].get("description") or "", "citation": ""}]
+            findings[f["id"]] = row
+            for b in row["basis"]:
+                top = b.get("of") or b
+                item = used.setdefault(top["id"], {**top, "points": [], "findings": []})
+                if b.get("of") and b["name"] not in item["points"]:
+                    item["points"].append(b["name"])
+                if all(x["id"] != f["id"] for x in item["findings"]):
+                    item["findings"].append({"id": f["id"], "title": f["title"], "status": f["status"]})
+        handed = Counter()
+        for r in a.get("runs") or []:
+            for lv, n in ((r.get("grounding") or {}).get("by_level") or {}).items():
+                handed[lv] = max(handed[lv], n)
+        return {"case": case_node if case_node in ents else None, "findings": findings, "rests_on": sorted(used.values(), key=lambda x: (-len(x["findings"]), x["name"])),
+                "known": [k for row in findings.values() for k in row["known"]], "handed": dict(handed), "learned": case.get("learned")}
+
+    def level_map(self, open_levels: list[str] | None = None, drilled: list[str] | None = None, cap: int = 40, show: str | None = None) -> dict[str, Any]:
         """The scene of the level map: the heads of every open level, and under each drilled entity what sits below it. Drilling only ever goes
-        down: from an industry to its use cases, from a use case to its documents, rules and cases, from a case to what it holds."""
+        down: from an industry to its use cases, from a use case to its documents, rules and cases, from a case to what it holds. `show` names
+        one node the scene must contain: everything on the way down to it is opened."""
         d = self.load()
         ents, origins = d["entities"], d["provenance"].get("origins") or {"entities": {}, "triples": {}}
-        adj: dict[str, set[str]] = defaultdict(set)
-        for t in d["triples"]:
-            adj[t["subject"]].add(t["object"])
-            adj[t["object"]].add(t["subject"])
+        adj, _ = self._links(d)
         order = {k: i for i, k in enumerate((*LEVEL_ORDER, "added"))}
+        path = self.trail(show) if show in ents else []
+        drilled = [*(drilled or []), *(x for x in path[:-1] if x not in (drilled or []))]
+        open_levels = [*(open_levels or []), *(lv for lv in dict.fromkeys(level_of(ents[x]) for x in path) if lv not in (open_levels or []))]
 
         def below(eid: str) -> list[str]:
             e = ents[eid]
@@ -1003,13 +1570,18 @@ class KnowledgeBase:
                 continue
             scene.setdefault(eid, None)
             kids = below(eid)
-            for k in kids[:cap]:
+            for k in kids[:cap * 2]:
                 scene.setdefault(k, eid)
-            more[eid] = max(0, len(kids) - cap)
+            more[eid] = max(0, len(kids) - cap * 2)
+        for above, node in zip(path, path[1:]):   # the node asked for is in the scene even where its level shows only the best connected
+            if scene.get(node) is None and node not in scene:
+                scene[node] = above
+        if path and path[0] not in scene:
+            scene[path[0]] = None
         nodes = [{"id": eid, "type": ents[eid]["type"], "name": ents[eid]["name"], "level": level_of(ents[eid]), "depth": depth_of(ents[eid]), "origin": origins["entities"].get(eid, "unknown"),
                   "stub": ents[eid]["stub"], "below": len(below(eid)), "from": parent, "drilled": eid in (drilled or []), "more": more.get(eid, 0)} for eid, parent in scene.items()]
         links = [{"s": t["subject"], "p": t["predicate"], "o": t["object"]} for t in d["triples"] if t["subject"] in scene and t["object"] in scene]
-        return {"levels": self.levels(d), "nodes": nodes, "links": links, "open": list(open_levels or []), "drilled": [x for x in drilled or [] if x in ents]}
+        return {"levels": self.levels(d), "nodes": nodes, "links": links, "open": list(open_levels or []), "drilled": [x for x in drilled or [] if x in ents], "trail": path}
 
     def grounding(self, use_case: str, classes: list[str], cap: int = 500) -> dict[str, Any]:
         """What the harness hands an agent from the graph before it runs: the nodes of the classes its contract names, for the case's use case
@@ -1024,9 +1596,22 @@ class KnowledgeBase:
         for t in d["triples"]:   # one step further for what hangs under a use case's own nodes: the lines of its references
             if t["subject"] in near and ents[t["object"]]["type"] == "ReferenceEntry":
                 near.add(t["object"])
+        rests: dict[str, list[dict[str, Any]]] = {}
+        if "PolicyRule" in classes:   # with its rules an agent is handed what each rests on: the provision, practice or term, in the industry of the use case
+            _, by = self._links(d)
+            serves = {o for s, o in by.get("useCaseServesIndustry", []) if s == uc}
+            for rule in sorted(x for x in near if ents[x]["type"] == "PolicyRule"):
+                items = self.basis(rule, within=serves)
+                if items:
+                    rests[ents[rule]["name"]] = [{"id": b["id"], "name": b["name"], "type": b["type"], "level": b["level"], "of": (b.get("of") or {}).get("name") or "", "citation": b["citation"],
+                                                 "says": b["says"][:300]} for b in items]
+                    near.update(b["id"] for b in items)
         wide = {"Organization", "Product"}   # the workspace's knowledge is not tied to one use case
         got = [e for e in ents.values() if e["type"] in classes and (e["id"] in near or e["type"] in wide) and not e["stub"]][:cap]
-        return {"nodes": len(got), "by_class": dict(Counter(e["type"] for e in got)), "by_level": dict(Counter(level_of(e) for e in got)), "ids": [e["id"] for e in got[:40]]}
+        out = {"nodes": len(got), "by_class": dict(Counter(e["type"] for e in got)), "by_level": dict(Counter(level_of(e) for e in got)), "ids": [e["id"] for e in got[:40]]}
+        if rests:
+            out["basis"] = rests
+        return out
 
     def signals(self, profile: Profile) -> dict[str, list[str]]:
         """Other names of a use case's kinds of document that added knowledge states: the classifier reads them as extra signals."""
@@ -1078,26 +1663,32 @@ class KnowledgeBase:
             if eid in (t["subject"], t["object"]):
                 other = t["object"] if t["subject"] == eid else t["subject"]
                 key = f"{t['subject']}|{t['predicate']}|{t['object']}"
-                links.append({"direction": "out" if t["subject"] == eid else "in", "predicate": t["predicate"], "other": other, "other_name": d["entities"][other]["name"], "other_type": d["entities"][other]["type"],
+                links.append({"direction": "out" if t["subject"] == eid else "in", "predicate": t["predicate"], "other": other, "other_name": d["entities"][other]["name"], "other_type": d["entities"][other]["type"], "other_level": level_of(d["entities"][other]),
                               "props": t["props"], "origin": origins["triples"].get(key, "unknown"), "support": why(prov["triple_support"].get(key))[:3]})
         cls = next((c for c in d["ontology"]["classes"] if c["name"] == e["type"]), {})
+        rule = eid if e["type"] == "PolicyRule" else next((t["object"] for t in d["triples"] if t["subject"] == eid and t["predicate"] == "findingAppliesRule"), None)
+        of_case = next((t["subject"] for t in d["triples"] if t["object"] == eid and t["predicate"] == "caseHasFinding"), None)
         return {"entity": e, "level": level_of(e), "also_at": [O.KB_FORGE_LEVEL[x] for x in O.kb_forge_levels(e["props"].get("knowledgeLevel"))[1:]],
-                "class": {"name": e["type"], "parent": cls.get("parent"), "definition": cls.get("definition")}, "origin": origins["entities"].get(eid, "unknown"),
+                "trail": self.way_to(eid), "usage": self.usage(eid), "rule": self._brief(d, rule) if rule and rule != eid else None, "basis": self.basis(rule, of_case) if rule else [],
+                "class": {"name": e["type"], "parent": cls.get("parent"), "definition": cls.get("definition")}, "origin": origins["entities"].get(eid, "unknown"), "attach": self.attach_options(eid),
+                "by_hand": next((f["id"] for f in self.facts() if f["entity"] == eid), None),
                 "support": why(prov["entity_support"].get(eid)), "links": sorted(links, key=lambda x: (x["predicate"], x["other_name"]))}
 
     def search(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
-        q = O.normalize_name(query)
+        key = lambda text: " ".join(re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).split())  # noqa: E731  brackets count here: 'article 14(c)' is not 'article 14'
+        q = key(query)
         if not q:
             return []
+        words = q.split()
         hits = []
         for e in self.load()["entities"].values():
-            names = [O.normalize_name(e["name"]), *(O.normalize_name(s) for s in e.get("synonyms") or [])]
-            score = max((3 if n == q else 2 if n.startswith(q) else 1 if q in n else 0) for n in names)
-            if not score and q in O.normalize_name(e["props"].get("description")):
+            names = [key(e["name"]), *(key(s) for s in e.get("synonyms") or [])]
+            score = max((3 if n == q else 2 if n.startswith(q) else 1 if f" {q} " in f" {n} " else 0.9 if q in n else 0.7 if all(w in n.split() for w in words) else 0) for n in names)
+            if not score and q in key(e["props"].get("description")):
                 score = 0.5
             if score:
                 hits.append((score, e))
-        return [{"id": e["id"], "type": e["type"], "name": e["name"], "description": (e["props"].get("description") or "")[:160], "cases": e["props"].get("seenInCases")}
+        return [{"id": e["id"], "type": e["type"], "name": e["name"], "level": level_of(e), "description": (e["props"].get("description") or "")[:160], "cases": e["props"].get("seenInCases")}
                 for _, e in sorted(hits, key=lambda x: (-x[0], x[1]["name"]))[:limit]]
 
     def property_graph(self) -> dict[str, Any]:
