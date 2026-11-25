@@ -112,8 +112,14 @@ Check it from any machine: `https://<your server>/docuinsights/health` answers
 ## 5. Open it
 
 `https://<your server>/docuinsights/`. The workbench asks for the API key once per browser session: the value of
-`DOCUINSIGHTS_API_KEY` in `.env` on the server. Give the address and the key to whoever should use it. To change the
-key, edit `.env` and run `service.ps1 -Restart`; the old key stops working at once.
+`DOCUINSIGHTS_API_KEY` in `.env` on the server. Give the address and the key to whoever should use it.
+
+To choose the key yourself, or to change it (the old key stops working at once):
+
+```powershell
+(Get-Content .env) -replace '^DOCUINSIGHTS_API_KEY=.*$', 'DOCUINSIGHTS_API_KEY=<your key>' | Set-Content .env
+.\deploy\windows\service.ps1 -Restart
+```
 
 Another system calls the same server with the key as a bearer token:
 `POST https://<your server>/docuinsights/api/v1/cases` (see `DOCUINSIGHTS.md`).
@@ -126,6 +132,11 @@ Another system calls the same server with the key as a bearer token:
   workspaces per customer, each with its own key, are what the CX Nova Agent Orchestration Layer adds when
   DocuInsights runs there as an agent pack.
 * The key travels with every request. Serve it over HTTPS only.
+* An address that sends 10 wrong keys inside ten minutes is refused until they age out, whatever it sends next
+  (`DOCUINSIGHTS_KEY_ATTEMPTS`; 0 switches it off). That slows guessing; it does not make a short key a strong one.
+  Whoever has the key can run assessments on your model and read every case in the workspace.
+* The workbench sends this key and nothing else. A token another application on the same address left in the browser
+  (the CX Nova portal's, for one) is never sent here.
 
 ## Updating
 

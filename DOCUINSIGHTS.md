@@ -247,6 +247,7 @@ the hash of the line before it, so an edited, removed or inserted line breaks th
 | how long a call waits for a slot | 20 s | `DOCUINSIGHTS_MODEL_MAX_WAIT_S` |
 | model calls and tokens per agent per run | in each contract | `foundation/contracts.yaml` |
 | API requests a minute per caller (standalone) | 600 | `DOCUINSIGHTS_API_RPM` |
+| wrong API keys from one address inside ten minutes (standalone) | 10, then that address waits | `DOCUINSIGHTS_KEY_ATTEMPTS` |
 | assessments running at once | 2 | `DOCUINSIGHTS_MAX_ASSESSMENTS` |
 
 At a limit a model call waits. Past the wait it is not made: the agent falls back to the profile's patterns, the run

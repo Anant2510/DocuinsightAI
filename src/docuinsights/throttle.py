@@ -163,3 +163,47 @@ class RequestGate:
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return {"requests_per_minute": self.rpm, "callers": len(self._seen), "totals": dict(self.totals)}
+
+
+class KeyAttempts:
+    """Wrong API keys per caller address. Past `limit` of them inside `window` seconds the address is refused until the oldest one
+    leaves the window, whatever key it sends: a short key cannot be found by trying."""
+
+    def __init__(self, limit: float = 10, window: float = 600, clock: Any = time.monotonic):
+        self.limit, self.window, self._clock = limit, window, clock
+        self._lock = threading.Lock()
+        self._wrong: dict[str, deque[float]] = {}
+        self.totals = {"wrong": 0, "refused": 0}
+
+    @classmethod
+    def from_env(cls) -> "KeyAttempts":
+        return cls(limit=_env("DOCUINSIGHTS_KEY_ATTEMPTS", 10))
+
+    def wait(self, address: str) -> float:
+        """0 when this address may try a key, else the seconds until it may."""
+        if not self.limit:
+            return 0.0
+        t = self._clock()
+        with self._lock:
+            q = self._wrong.get(address)
+            while q and t - q[0] >= self.window:
+                q.popleft()
+            if q is not None and not q:
+                del self._wrong[address]
+            if q and len(q) >= self.limit:
+                self.totals["refused"] += 1
+                return max(1.0, self.window - (t - q[0]))
+        return 0.0
+
+    def wrong(self, address: str) -> None:
+        t = self._clock()
+        with self._lock:
+            self._wrong.setdefault(address, deque()).append(t)
+            self.totals["wrong"] += 1
+            if len(self._wrong) > 5000:   # forget addresses whose wrong keys have aged out
+                for k in [k for k, v in self._wrong.items() if not v or t - v[-1] >= self.window]:
+                    del self._wrong[k]
+
+    def snapshot(self) -> dict[str, Any]:
+        return {"wrong_keys_before_a_wait": self.limit, "window_s": self.window, **self.totals}
+

@@ -676,6 +676,19 @@ def test_knowledge_built_in_kb_forge_is_read_as_kb_forge_writes_it(svc):
     assert tools.overlay["signals"]["goods_received_note"] == ["receiving report", "goods receipt advice"] and kb.signals(get_profile("supplier_invoice")) == {"goods_received_note": ["receiving report", "goods receipt advice"]}
 
 
+def test_wrong_keys_are_counted_per_address_and_age_out():
+    now = [0.0]
+    keys = TH.KeyAttempts(limit=3, window=600, clock=lambda: now[0])
+    for _ in range(3):
+        assert keys.wait("203.0.113.9") == 0
+        keys.wrong("203.0.113.9")
+        now[0] += 10
+    assert 570 <= keys.wait("203.0.113.9") <= 600 and keys.wait("198.51.100.4") == 0, "the address that guessed waits; another address is not held up by it"
+    now[0] = 601
+    assert keys.wait("203.0.113.9") == 0 and keys.totals == {"wrong": 3, "refused": 1}, "the oldest wrong key has aged out: it may try again"
+    assert TH.KeyAttempts(limit=0).wait("x") == 0
+
+
 # ------------------------------------------------------------------------------------------------ the provenance ledger
 def test_the_ledger_chains_every_action_and_shows_tampering(svc, tmp_path):
     c = assessed(svc, "mismatch", "supplier_invoice")
@@ -746,6 +759,7 @@ def test_the_http_api_serves_the_workbench_and_guards_the_api(tmp_path, monkeypa
 
     with TestClient(create_app(Service(tmp_path / "data"))) as client:
         assert "DocuInsights" in client.get("/").text and client.get("/static/hub.js").status_code == 200 and client.get("/static/../app.py").status_code == 404
+        assert 'data-auth="key"' in client.get("/").text, "the page says, before any call, that this installation asks for its own key"
         assert client.get("/health").json() == {"status": "ok", "product": "DocuInsights", "version": client.get("/api/config").json()["version"], "model": "offline", "api_key": "not set: local callers only"}
         # no key: local callers only, and a caller that came through a reverse proxy is not local, even one on this machine
         assert client.get("/api/cases").status_code == 200 and client.get("/api/cases", headers={"X-Forwarded-For": "203.0.113.9"}).status_code == 401
@@ -784,6 +798,10 @@ def test_the_http_api_serves_the_workbench_and_guards_the_api(tmp_path, monkeypa
     with TestClient(create_app(Service(tmp_path / "data2"))) as client:
         assert client.get("/api/cases").status_code == 401 and client.get("/api/cases", headers={"Authorization": "Bearer s3cret"}).status_code == 200
         assert client.get("/api/cases", headers={"Authorization": "Bearer s3cret", "X-Forwarded-For": "203.0.113.9"}).status_code == 200 and client.get("/health").json()["api_key"] == "set", "with the key, from anywhere"
+        # wrong keys are counted per address: past the limit the address waits, even with the right key, so a short key cannot be found by trying
+        wrong = [client.get("/api/cases", headers={"Authorization": f"Bearer guess-{n}"}).status_code for n in range(11)]
+        locked = client.get("/api/cases", headers={"Authorization": "Bearer s3cret"})
+        assert wrong == [401] * 10 + [429] and locked.status_code == 429 and "Too many wrong keys" in locked.json()["detail"] and client.get("/api/cases").status_code == 429
     monkeypatch.setenv("DOCUINSIGHTS_API_RPM", "3")
     with TestClient(create_app(Service(tmp_path / "data3"))) as client:
         codes = [client.get("/api/cases", headers={"Authorization": "Bearer s3cret"}).status_code for _ in range(5)]

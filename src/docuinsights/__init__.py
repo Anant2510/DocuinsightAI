@@ -28,5 +28,5 @@ The package has no dependency on any host. It runs three ways:
     behind another system  the /api/v1 surface and a repository connector (stand-in folder store, NewgenONE OmniDocs)
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 PRODUCT = "DocuInsights"

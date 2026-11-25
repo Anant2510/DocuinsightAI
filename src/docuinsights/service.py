@@ -46,6 +46,7 @@ class Service:
         # the foundation every agent runs on: one rate limit for all model calls, one gate on the API, a cap on assessments in flight
         self.limiter = T.Limiter.from_env()
         self.gate = T.RequestGate.from_env()
+        self.key_attempts = T.KeyAttempts.from_env()
         self.max_assessments = max(1, int(T._env("DOCUINSIGHTS_MAX_ASSESSMENTS", 2)))
         self._slots = threading.BoundedSemaphore(self.max_assessments)
         self._kb: dict[str, KB.KnowledgeBase] = {}

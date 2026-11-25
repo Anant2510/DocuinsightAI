@@ -17,7 +17,8 @@ A host that mounts the app does its own authentication and tells the app who is 
 only that the server is up.
 
 Standalone throttling: each caller (its key, or its address) may make DOCUINSIGHTS_API_RPM requests a minute (600);
-past that the API answers 429 with Retry-After. A host that mounts the app applies its own limits.
+past that the API answers 429 with Retry-After. An address that sends DOCUINSIGHTS_KEY_ATTEMPTS wrong keys (10) inside
+ten minutes is refused until they age out. A host that mounts the app applies its own limits.
 """
 from __future__ import annotations
 
@@ -87,8 +88,14 @@ def create_app(service: Service | None = None, *, tenant_of: Callable[[Request],
         if request.headers.get("authorization", "").lower().startswith("bearer "):
             supplied = request.headers["authorization"][7:].strip()
         if api_key:
+            address = request.client.host if request.client else "?"
+            wait = svc.key_attempts.wait(address)
+            if wait:   # too many wrong keys from this address: refused whatever it sends now, so a short key cannot be found by trying
+                raise ServiceError(f"Too many wrong keys from this address. Try again in {int(wait // 60) + 1} minute(s).", 429)
             if not (supplied and hmac.compare_digest(supplied.encode(), api_key.encode())):
-                raise ServiceError("Send the API key as 'Authorization: Bearer <key>'.", 401)
+                if supplied:
+                    svc.key_attempts.wrong(address)
+                raise ServiceError("That key was not accepted." if supplied else "Send the API key as 'Authorization: Bearer <key>'.", 401)
         elif (request.client.host if request.client else "") not in LOOPBACK or any(h in request.headers for h in PROXIED):
             # behind a proxy on the same machine every caller looks local: what the proxy adds says otherwise
             raise ServiceError("This installation has no API key, so it answers local callers only. Set DOCUINSIGHTS_API_KEY on the server.", 401)
@@ -218,7 +225,7 @@ def create_app(service: Service | None = None, *, tenant_of: Callable[[Request],
         return svc.knowledge(T(r)).rebuild(list(load_profiles().values()))
 
     def page(request: Request) -> HTMLResponse:
-        html = (WEB / "index.html").read_text(encoding="utf-8").replace("{{BASE}}", base(request)).replace("{{VERSION}}", __version__)
+        html = (WEB / "index.html").read_text(encoding="utf-8").replace("{{BASE}}", base(request)).replace("{{VERSION}}", __version__).replace("{{AUTH}}", "key" if auth == "key" else "host")
         return HTMLResponse(html, headers={"cache-control": "no-cache"})
 
     def static(request: Request) -> Response:

@@ -18,7 +18,11 @@
     return el;
   }
   function add(el, kid) { if (kid === null || kid === undefined || kid === false) return; if (Array.isArray(kid)) kid.forEach((k) => add(el, k)); else el.appendChild(kid.nodeType ? kid : document.createTextNode(String(kid))); }
-  const token = () => { try { return (S.cfg && S.cfg.auth === "key" ? "" : localStorage.getItem("cxnova.shop.admin") || localStorage.getItem("cxnova.shop.token")) || sessionStorage.getItem("docuinsights.key") || ""; } catch (e) { return ""; } };
+  // Who is asked for a credential is decided by the page, before the first call: on its own this installation's API key and nothing else
+  // is sent (a host's token left in this browser by another application on the same address is not); mounted in a host, the host's token.
+  const KEYED = root.dataset.auth !== "host";
+  let ownKey = "";
+  const token = () => { try { return KEYED ? ownKey || sessionStorage.getItem("docuinsights.key") || "" : localStorage.getItem("cxnova.shop.admin") || localStorage.getItem("cxnova.shop.token") || ""; } catch (e) { return KEYED ? ownKey : ""; } };
   async function api(path, body, method) {
     const headers = {}; const t = token(); if (t) headers.Authorization = "Bearer " + t;
     if (body !== undefined) headers["Content-Type"] = "application/json";
@@ -47,7 +51,7 @@
         let el;
         if (f.options) el = h("select", { onchange: (e) => (vals[f.k] = e.target.value) }, f.options.map((o) => h("option", { value: o[0], selected: o[0] === f.value }, o[1])));
         else if (f.type === "textarea") el = h("textarea", { oninput: (e) => (vals[f.k] = e.target.value) });
-        else el = h("input", { type: f.type === "date" ? "date" : "text", value: f.value || "", placeholder: f.placeholder || "", oninput: (e) => (vals[f.k] = e.target.value) });
+        else el = h("input", { type: f.type === "date" ? "date" : f.type === "password" ? "password" : "text", autocomplete: f.type === "password" ? "off" : null, value: f.value || "", placeholder: f.placeholder || "", oninput: (e) => (vals[f.k] = e.target.value) });
         vals[f.k] = f.value || (f.options ? f.options[0][0] : "");
         return h("label", { class: "f" }, h("span", null, f.label), el);
       });
@@ -57,10 +61,16 @@
       document.body.appendChild(box); const first = box.querySelector("input,select,textarea"); if (first) first.focus();
     });
   }
+  let asking = false;
   async function signIn(message) {
-    if (S.cfg && S.cfg.auth !== "key") { toast("Sign in to the host portal first, then reload this page. " + (message || "")); return; }
-    const v = await form("This installation needs its API key", [{ k: "key", label: message || "API key", placeholder: "DOCUINSIGHTS_API_KEY" }], "Continue");
-    if (v && v.key) { try { sessionStorage.setItem("docuinsights.key", v.key.trim()); } catch (e) { /* private window */ } start(); }
+    if (!KEYED) { toast("Sign in to the host portal first, then reload this page. " + (message || "")); return; }
+    if (asking) return;   // several calls can fail at once: one question
+    asking = true;
+    const tried = !!token();
+    ownKey = ""; try { sessionStorage.removeItem("docuinsights.key"); } catch (e) { /* private window */ }
+    const v = await form("This installation needs its API key", [{ k: "key", type: "password", label: tried ? "That key was not accepted. Enter the API key of this installation." : "API key", placeholder: "API key" }], "Continue");
+    asking = false;
+    if (v && v.key) { ownKey = v.key.trim(); try { sessionStorage.setItem("docuinsights.key", ownKey); } catch (e) { /* private window: kept for this page only */ } start(); }
   }
 
   // ---------------------------------------------------------------------------------------------- data
