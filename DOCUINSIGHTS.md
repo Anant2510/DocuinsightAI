@@ -183,12 +183,38 @@ An imported knowledge base sits at the level it was built for, or the level chos
 combined graph spans levels and records the level on every entity: each entity sits at its own (one known at several
 levels sits at the first and says the others). Knowledge with no level at all is shown apart, as **added knowledge**.
 
-The **Knowledge** screen opens on the **level map**, as KB Forge draws one: the four levels as boxes stacked top to
-bottom, each with the entities at its head. A click on an entity opens what is below it, and drilling only goes down
-(an industry opens its standards, processes and risks, a standard its articles, a use case its documents and rules,
-the workspace its cases, a case what it holds). Inside a level each row is one kind of thing, and a kind can be
-hidden. *Network* shows the same graph as a force layout. *Manage* lists everything the graph is built from.
-`GET /api/knowledge/map?open=industry,domain&drill=<entity id>&show=<entity id>` returns the scene.
+The **Knowledge** screen draws the graph in the format of KB Forge's own *Explore* screen, on its **level map**:
+
+* **The canvas.** A dotted grid that pans (drag) and zooms (wheel, or the + / − / fit buttons). The four levels are
+  boxes on a spine at the left, each joined by a dashed connector to the entities that head it. An entity is a circle
+  in the colour of its level (KB Forge's colours: industry blue, domain teal, the third level violet, customer pink)
+  with its name under it, a ring when it is known at a second level too, and **+N** for what is still to open below
+  it.
+* **Drilling.** One click shows an entity in the inspector; a double-click drills down, and drilling only goes down
+  (an industry opens its standards, processes and risks, a standard its articles, a use case its documents and rules,
+  the workspace its cases, a case what it holds). What opens is laid out as KB Forge's **tidy tree**: the children in
+  a grid under their parent, each kind starting a line of its own with its caption (`Provisions · 18`), joined by
+  connectors that never cross a name. The layout is computed, not settled by forces: the same scene always looks the
+  same.
+* **Three layouts** of the same scene: *Layered* (the tidy tree), *Force*, and *Radial* (ring by ring around what is
+  selected).
+* **Level bar and trail.** The level bar opens and closes a level (`Industry 5/5`). The trail under it says where
+  the selected entity sits (`Industry › Trade finance › UCP 600 › UCP 600 article 14(c)`), with *Up* and *Top*.
+* **Scene & filters** (left): what each level holds, how much is on the scene, the kinds of thing and of link on it
+  with an eye to hide each (or *only* one), relation labels, and every link rather than only the tree's.
+* **Inspector** (right): for an entity, where it sits and what drilling does (*Drill down*, *Up to …*, *Collapse*,
+  *Top*), its kind, origin and level, what it says and how it is cited, its attributes, its relations and where it
+  comes from; for a level, what it holds and the entities that head it.
+
+A scene that still reads whole is always shown whole, clear of the panels; a larger one keeps what was just opened
+where it was on the screen and brings what it opened into view. *Manage* (beside *Explore the graph*) lists everything
+the graph is built from. `GET /api/knowledge/map?open=industry,domain&drill=<entity id>&show=<entity id>` returns the
+scene: the levels, and each entity with its level, kind, the entity it hangs from, how much is below it and how
+connected it is.
+
+The explorer is written for this workbench (one script, no framework) after KB Forge 2.23's: the same tidy-tree
+layout and connector routing, the same sizes for a level's box and an entity's circle, the same panels and wording.
+KB Forge's graph assistant, walkthrough, saved views, undo and path-finding between two entities are not part of it.
 
 The graph is never edited in place. It is rebuilt from its sources after every assessment, decision, import and change
 made on the Manage view, so nothing is lost and nothing is counted twice: the curated knowledge bases, the profiles,
@@ -235,11 +261,11 @@ file with a new `id` adds to an industry or to the domain (a house manual and it
 rule), a file with the `id` of a shipped one replaces it.
 
 **From a finding to the exact node.** Each node has an address of its own, `#/knowledge/<entity id>`. Opening it
-opens the level map along the way down to the node (the head of its level, what it sits under, the node), with that
-way drawn on the map and as a breadcrumb in the node's panel. The panel says what the node states and how it is
-cited, **what its rule rests on** (for a rule or a finding), **where it is used** (the rules that rest on it, the
-findings they produced by status, the cases, each opening the case or the finding's own node), every link grouped by
-kind, and where the node came from.
+opens the tree along the way down to the node (the head of its level, what it sits under, the node), with that way
+drawn on the canvas as KB Forge draws a path, the node ringed, and the trail showing it. Beyond what KB Forge's
+inspector shows, this one says **what its rule rests on** (for a rule or a finding) and **where it is used** (the
+rules that rest on it, the findings they produced by status, the cases, each opening the case or the finding's own
+node).
 
 * The harness hands the evidence, policy and contradiction agents, with the rules of the use case, what each rule
   rests on. The agent puts it on every finding it produces (`finding.basis`: the node id, name, citation and what it
@@ -286,7 +312,7 @@ combined-graph pages; 89,956 entity records and 254,883 links, which merge to 17
 read, and every entity landed on one of the four levels (industry 5,995, domain 2,986, solution 8,395, customer 156),
 731 of them known at more than one. 121 links (0.2%, all in combined-graph pages) do not fit the domain and range the
 page's own ontology declares and are kept as `relatedTo` with their original name, as KB Forge does. With that much
-knowledge the level map answers in 0.1 s and an assessment takes about 6 s, most of it the rebuild of the graph. Not
+knowledge the scene of the level map is returned in 0.1 s and an assessment takes about 6 s, most of it the rebuild of the graph. Not
 checked: an import through a running KB Forge (its job registration, its RDF, SHACL, GraphDB and Neo4j exports,
 Explore and Ask on the result). The RDF, SHACL and GraphDB exports KB Forge writes are not written here.
 

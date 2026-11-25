@@ -49,7 +49,7 @@ SCHEMA = "1.0"
 MAX_IMPORT = 60_000
 DOMAIN = "Document and case intelligence"   # the experience domain every use case of this accelerator belongs to
 ACCELERATOR = "DocuInsights"
-BUILD = 4   # the shape a build writes. 3: KB Forge's four levels in its own level ids, the company at the head of the cases. 4: the curated knowledge bases
+BUILD = 5   # the shape a build writes. 3: KB Forge's four levels in its own level ids, the company at the head of the cases. 4: the curated knowledge bases. 5: a plain added graph gets the depth of its kinds.
 KNOWLEDGE_DIR = Path(__file__).resolve().parent / "foundation" / "knowledge"   # the industry and domain knowledge bases that ship with the accelerator
 LEVEL_ORDER = ("industry", "domain", "solution", "customer")
 ORIGIN_WORDS = {"document": "read in a document", "system": "from the case record", "settings": "declared by a use case", "web": "from a retrieved reference",
@@ -875,12 +875,14 @@ def build(contributions: list[dict[str, Any]], onto: O.Ontology | None = None) -
         # customer), the level the entity is shown at first. graphLevel: how deep it sits when the graph is drilled down. What the accelerator,
         # the use cases and the cases contributed is placed by its class. What only an added knowledge base knows sits at the level chosen for
         # that knowledge base, else at the level KB Forge recorded on the entity itself (a combined graph says it entity by entity), and keeps
-        # the depth it came with. No level at all: added knowledge.
+        # the depth it came with (a graph that states none: the depth of its kind, where the level is that kind's own). No level at all: added knowledge.
         came = O.kb_forge_levels(e["props"].get("knowledgeLevel"))
         hinted, deep = e.pop("_levels", None) or [], e.pop("_depth", None)
         e.pop("_guessed", None)
         if _added(e):
             home = next((placed[m] for m in e["sourceModules"] if m in placed), "")
+            if home and "graphLevel" not in e["props"] and onto.depth(e["type"]) and onto.level(e["type"]) == home:
+                e["props"]["graphLevel"] = onto.depth(e["type"])   # a plain graph says no depth: a thing of a kind this level is made of sits where that kind sits, so the level opens to it
         else:
             home = (hinted[0] if hinted else None) or onto.level(e["type"]) or "customer"
             came = [*(O.KB_FORGE_ID[x] for x in hinted[1:]), *came]   # also known at these levels
@@ -1565,13 +1567,15 @@ class KnowledgeBase:
             for e in sorted(heads, key=lambda e: (-len(adj[e["id"]]), e["name"]))[:cap]:
                 scene.setdefault(e["id"], None)
         more: dict[str, int] = {}
-        for eid in drilled or []:
-            if eid not in ents:
-                continue
+        heads = set(scene)
+        opened = [eid for eid in drilled or [] if eid in ents]
+        for eid in opened:
             scene.setdefault(eid, None)
+        for eid in opened:   # whatever order they were opened in, an entity hangs from the one it was drilled from
             kids = below(eid)
             for k in kids[:cap * 2]:
-                scene.setdefault(k, eid)
+                if k not in scene or (scene[k] is None and k not in heads):
+                    scene[k] = eid
             more[eid] = max(0, len(kids) - cap * 2)
         for above, node in zip(path, path[1:]):   # the node asked for is in the scene even where its level shows only the best connected
             if scene.get(node) is None and node not in scene:
@@ -1579,7 +1583,8 @@ class KnowledgeBase:
         if path and path[0] not in scene:
             scene[path[0]] = None
         nodes = [{"id": eid, "type": ents[eid]["type"], "name": ents[eid]["name"], "level": level_of(ents[eid]), "depth": depth_of(ents[eid]), "origin": origins["entities"].get(eid, "unknown"),
-                  "stub": ents[eid]["stub"], "below": len(below(eid)), "from": parent, "drilled": eid in (drilled or []), "more": more.get(eid, 0)} for eid, parent in scene.items()]
+                  "stub": ents[eid]["stub"], "below": len(below(eid)), "from": parent, "drilled": eid in (drilled or []), "more": more.get(eid, 0), "degree": len(adj[eid]),
+                  "also": [O.KB_FORGE_LEVEL[x] for x in O.kb_forge_levels(ents[eid]["props"].get("knowledgeLevel"))[1:]]} for eid, parent in scene.items()]
         links = [{"s": t["subject"], "p": t["predicate"], "o": t["object"]} for t in d["triples"] if t["subject"] in scene and t["object"] in scene]
         return {"levels": self.levels(d), "nodes": nodes, "links": links, "open": list(open_levels or []), "drilled": [x for x in drilled or [] if x in ents], "trail": path}
 

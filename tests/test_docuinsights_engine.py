@@ -557,6 +557,11 @@ def test_the_knowledge_base_is_a_kb_forge_knowledge_base_that_grows_with_every_c
     assert {e["name"] for e in ents if len(e["props"]["knowledgeLevel"]) > 1} == {"Evidence request rate", "Exception rate"}, "a measure an industry and the domain both use is one node, known at both levels"
     scene = kb.level_map(["industry", "domain", "solution", "customer"], [])
     assert {(n["level"], n["type"]) for n in scene["nodes"]} == {("industry", "IndustrySegment"), ("domain", "ExperienceDomain"), ("solution", "Accelerator"), ("customer", "Company")}
+    assert all(set(n) == {"id", "type", "name", "level", "depth", "origin", "stub", "below", "from", "drilled", "more", "degree", "also"} and n["degree"] >= n["below"] > 0 and n["from"] is None for n in scene["nodes"]), "what the explorer draws: the circle's size, +N, what it hangs from"
+    late = kb.level_map(["domain"], ["policyrule/invoice-total-does-not-exceed-the-order", "usecase/supplier-invoice-check"])   # opened in any order, an entity hangs from the one it was drilled from
+    assert next(n for n in late["nodes"] if n["id"] == "policyrule/invoice-total-does-not-exceed-the-order")["from"] == "usecase/supplier-invoice-check"
+    both = kb.level_map(["industry", "domain"], ["industrysegment/finance-operations", "experiencedomain/document-and-case-intelligence"])
+    assert {n["name"]: (n["level"], n["also"]) for n in both["nodes"] if n["also"]} == {"Exception rate": ("industry", ["domain"]), "Evidence request rate": ("industry", ["domain"])}, "an entity known at a second level says so: the explorer rings it"
     assert {(x["s"], x["p"], x["o"]) for x in scene["links"]} >= {("accelerator/docuinsights", "acceleratorForDomain", "experiencedomain/document-and-case-intelligence")}
     drilled = kb.level_map(["domain"], ["usecase/supplier-invoice-check", "company/this-workspace"])
     under = {n["type"] for n in drilled["nodes"] if n["from"] == "usecase/supplier-invoice-check"}

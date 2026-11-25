@@ -3,11 +3,11 @@
 (function () {
   "use strict";
   const root = document.getElementById("app"), BASE = root.dataset.base || "";
-  const S = { cfg: null, cases: [], c: null, view: "home", sel: {}, chat: false, chatLog: [], cf: null, draft: null, fb: null, timer: null, filter: { status: "attention", family: "all" }, layers: { document: true, entity: true, reference: true, reasoning: false, assertion: false }, k: { ov: null, g: null, m: null, e: null, view: "map", open: ["industry", "domain", "solution", "customer"], drill: [], levels: ["industry", "domain"], hits: null, q: "", place: "", hide: [], more: null, back: null, jump: false }, ck: null, pf: null,
+  const S = { cfg: null, cases: [], c: null, view: "home", sel: {}, chat: false, chatLog: [], cf: null, draft: null, fb: null, timer: null, filter: { status: "attention", family: "all" }, layers: { document: true, entity: true, reference: true, reasoning: false, assertion: false }, k: { ov: null, g: null, m: null, e: null, view: "explore", layout: "layered", open: ["industry", "domain", "solution", "customer"], drill: [], grp: null, tf: null, auto: true, frame: "", focus: null, anchor: null, grew: null, reveal: null, cw: null, left: null, labels: true, every: false, hideT: [], hideR: [], hits: null, q: "", place: "", more: null, back: null }, ck: null, pf: null,
     orch: { t: null, playing: false, speed: 1, auto: false, sel: null, timer: null } };
 
   // ---------------------------------------------------------------------------------------------- helpers
-  const SVG = new Set(["svg", "g", "line", "circle", "text", "title", "rect", "path"]);
+  const SVG = new Set(["svg", "g", "line", "circle", "text", "tspan", "title", "rect", "path", "defs", "pattern", "marker"]);
   function h(tag, attrs) {
     const el = document.createElementNS(SVG.has(tag) ? "http://www.w3.org/2000/svg" : "http://www.w3.org/1999/xhtml", tag);
     for (const [k, v] of Object.entries(attrs || {})) {
@@ -85,6 +85,8 @@
     kOpen(id).catch((err) => { if (err.status === 401) return signIn(err.message); toast(err.status === 404 ? "That node is not in the knowledge graph any more." : err.message); kHash(null); top("knowledge")(); });
   }
   window.addEventListener("hashchange", fromAddress);
+  let resized = null;
+  window.addEventListener("resize", () => { clearTimeout(resized); resized = setTimeout(() => { if (S.cfg && S.view === "knowledge" && !S.c && S.k.view !== "manage") { S.k.cw = null; S.k.tf = null; render(); } }, 160); });
   async function open(ref, view) { clearInterval(S.orch.timer); S.orch = { t: null, playing: false, speed: S.orch.speed || 1, auto: !!S.orch.auto, sel: null, timer: null, ticks: 0 }; S.c = await api("cases/" + encodeURIComponent(ref)); S.k.back = null; kHash(null); S.view = view || (A() ? "summary" : "monitor"); S.sel = {}; S.cf = null; S.draft = null; S.chatLog = (S.c.chat || []).flatMap((m) => [{ r: "u", t: m.question }, { r: "a", t: m.answer, no: !m.grounded }]); watch(); render(); }
   function setCase(c, view) { S.c = c; if (view) S.view = view; watch(); render(); }
   function watch() {
@@ -101,8 +103,7 @@
   const top = (view) => run(async () => {   // a screen of the workspace (no case open): load what it shows, then draw it
     clearTimeout(S.timer); clearInterval(S.orch.timer); S.orch.playing = false; S.c = null; S.sel = {}; kHash(null); if (view !== "knowledge") S.k.back = null;
     if (view === "home" || view === "cases") S.cases = await api("cases");
-    if (view === "knowledge") { S.k.ov = await api("knowledge"); S.k.m = await api("knowledge/map?" + mapQuery());
-      if (!S.k.touched && !S.k.drill.length) { S.k.drill = S.k.m.levels.filter((l) => l.heads === 1).map((l) => (S.k.m.nodes.find((n) => n.level === l.id && !n.from) || {}).id).filter(Boolean); if (S.k.drill.length) S.k.m = await api("knowledge/map?" + mapQuery()); } S.k.g = S.k.view === "network" ? await api("knowledge/graph?levels=" + S.k.levels.join(",")) : null; S.k.e = null; S.k.hits = null; }
+    if (view === "knowledge") { S.k.ov = await api("knowledge"); S.k.m = await api("knowledge/map?" + mapQuery()); Object.assign(S.k, { e: null, grp: null, hits: null, tf: null, auto: true, focus: null, anchor: null, grew: null, reveal: null }); }
     if (view === "platform") S.pf = await api("platform");
     S.view = view; render(); window.scrollTo(0, 0);
   });
@@ -116,12 +117,13 @@
       h("span", { class: "tag" }, "Repository: " + S.cfg.repository.kind), S.cfg.links.portal ? h("a", { class: "tag", href: S.cfg.links.portal, style: "text-decoration:none" }, "CX Nova portal") : null,
       h("span", { class: "tag demo" }, "Demonstration · synthetic data"));
     const views = { home, cases, new: newCase, agents, knowledge, platform, summary, documents, graph, evidence, consistency, reference, policy, provenance, whatif, monitor, decision, audit };
-    const main = h("main", { class: "main" });
+    const main = h("main", { class: "main" + (S.view === "knowledge" && !S.c && S.k.view !== "manage" ? " full" : "") });
     if (S.c && !a && !["monitor", "documents"].includes(S.view)) S.view = "monitor";
     add(main, (views[S.view] || home)());
     const shell = h("div", { class: "shell" + (S.c ? "" : " wide") }, S.c ? rail(running) : null, main);
     root.replaceChildren(...[bar, shell, S.c && a ? chat() : null].filter(Boolean));
-    if (S.k.jump) { S.k.jump = false; requestAnimationFrame(() => { const el = document.querySelector("svg.lmap g.nd.sel"); if (el && el.scrollIntoView) el.scrollIntoView({ block: "center" }); }); }
+    const cv = document.querySelector(".gx-canvas");   // the explorer fits its scene to the canvas as it really is
+    if (cv) { const w = Math.round(cv.getBoundingClientRect().width); if (w && Math.abs(w - kArea().w) > 2) { S.k.cw = w; S.k.tf = null; render(); } }
   }
   function rail(running) {
     const a = A(), count = (pred) => F(pred).length, n = (v, cls) => (v ? h("span", { class: "n " + (cls || "") }, v) : null);
@@ -209,80 +211,286 @@
     Company: "#5a3794", Organization: "#7a4fb5", Product: "#a887d6", Case: "#3d2a6b", SourceDocument: "#8fa9d8", Identifier: "#b9a3dc", CaseFinding: "#c9c2d8",
     Standard: "#1d4ea0", Regulation: "#16408a", Provision: "#6f93d6", StandardsBody: "#9bb4e4", BusinessProcess: "#0e8f8f", Risk: "#b8342b", KPI: "#c79a1a", Term: "#8a93a3", BestPractice: "#2f9e6e", Capability: "#57b894", Challenge: "#d9822b", PainPoint: "#d9822b" };
   const ORIGIN_PILL = { document: "pass", system: "info", settings: "info", web: "info", curated: "info", manual: "review", imported: "review", inferred: "", decision: "pass", unverified: "fail", unknown: "" };
-  let kKey = "", kPos = null;
-  function spread(nodes, links, W, H) {   // Fruchterman-Reingold with a deterministic start, as on the case graph
-    const pos = {}, n0 = nodes.length || 1, k = Math.sqrt((W * H) / n0) * 0.7;
-    nodes.forEach((n, i) => { const t = i * 2.399963, r = Math.sqrt((i + 0.5) / n0) * Math.min(W, H) * 0.46; pos[n.id] = { x: W / 2 + r * Math.cos(t) * 1.5, y: H / 2 + r * Math.sin(t) }; });
-    const its = nodes.length > 160 ? 140 : 260;
-    for (let it = 0; it < its; it++) {
-      const f = {}, temp = 34 * (1 - it / its) + 0.6; nodes.forEach((n) => (f[n.id] = { x: 0, y: 0 }));
-      for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) { const a = pos[nodes[i].id], b = pos[nodes[j].id], dx = a.x - b.x || 0.01, dy = a.y - b.y || 0.01, d = Math.max(Math.sqrt(dx * dx + dy * dy), 4), rp = (k * k) / d; f[nodes[i].id].x += (dx / d) * rp; f[nodes[i].id].y += (dy / d) * rp; f[nodes[j].id].x -= (dx / d) * rp; f[nodes[j].id].y -= (dy / d) * rp; }
-      links.forEach((e) => { const a = pos[e.s], b = pos[e.o], dx = a.x - b.x, dy = a.y - b.y, d = Math.max(Math.sqrt(dx * dx + dy * dy), 4), at = (d * d) / k; f[e.s].x -= (dx / d) * at; f[e.s].y -= (dy / d) * at; f[e.o].x += (dx / d) * at; f[e.o].y += (dy / d) * at; });
-      nodes.forEach((n) => { const p = pos[n.id], v = f[n.id], m = Math.sqrt(v.x * v.x + v.y * v.y) || 1; p.x += (v.x / m) * Math.min(m, temp) + (W / 2 - p.x) * 0.012; p.y += (v.y / m) * Math.min(m, temp) + (H / 2 - p.y) * 0.02; p.x = Math.min(W - 150, Math.max(24, p.x)); p.y = Math.min(H - 18, Math.max(18, p.y)); });
-    }
-    return pos;
-  }
-  // Getting to a node. Every node has an address of its own (#/knowledge/<id>): opening it opens the level map along the way down to it.
+  // Getting to a node. Every node has an address of its own (#/knowledge/<id>): opening it opens the tree along the way down to it.
   const kHash = (id) => { try { history.replaceState(null, "", id ? "#/knowledge/" + encodeURIComponent(id) : location.pathname + location.search); } catch (err) { /* a frame that may not touch the address */ } };
   const kLink = (id) => location.origin + location.pathname + location.search + "#/knowledge/" + encodeURIComponent(id);
   async function kOpen(id) {
     clearTimeout(S.timer); clearInterval(S.orch.timer); S.orch.playing = false;
     const e = await api("knowledge/entity?id=" + encodeURIComponent(id));
     if (!S.k.ov) S.k.ov = await api("knowledge");
-    const fresh = S.view !== "knowledge" || !!S.c;   // arriving from a case or another screen: the map shows the way to this node and nothing else opened
+    const fresh = S.view !== "knowledge" || !!S.c || S.k.view !== "explore";   // arriving from a case or another screen: the scene shows the way to this node and nothing else opened
     const m = await api("knowledge/map?" + (fresh ? "open=" + S.k.open.join(",") : mapQuery()) + "&show=" + encodeURIComponent(id));
     if (S.c) S.k.back = S.c.reference;
-    Object.assign(S.k, { e, m, open: m.open, drill: m.drilled, view: "map", touched: true, jump: true, hits: null, hide: [], more: null });
+    if (fresh) S.k.q = "";
+    Object.assign(S.k, { e, m, grp: null, open: m.open, drill: m.drilled, view: "explore", hits: null, hideT: [], more: null, tf: null, auto: true, focus: id, anchor: null, grew: null, reveal: null });
     S.c = null; S.sel = {}; S.view = "knowledge"; kHash(id); render();
   }
   const kShow = (id) => run(() => kOpen(id));
-  const kEntity = (id) => run(async () => { S.k.e = await api("knowledge/entity?id=" + encodeURIComponent(id)); S.k.more = null; kHash(id); render(); });
-  const kGraph = (query) => run(async () => { S.k.g = await api("knowledge/graph?" + query); render(); });
-  const kMap = () => run(async () => { S.k.m = await api("knowledge/map?" + mapQuery()); render(); });
-  const kReload = async (keep) => { S.ck = null; S.k.ov = await api("knowledge"); S.k.m = await api("knowledge/map?" + mapQuery()); if (!keep) { S.k.e = null; kHash(null); } S.k.g = null; if (S.k.view === "network") S.k.view = "map"; render(); };
+  const kSelect = (id) => run(async () => { S.k.e = await api("knowledge/entity?id=" + encodeURIComponent(id)); S.k.grp = null; S.k.more = null; S.k.reveal = id; kHash(id); render(); });
+  const kMapNow = async () => { S.k.m = await api("knowledge/map?" + mapQuery()); render(); };
+  const kReload = async (keep) => { S.ck = null; S.k.ov = await api("knowledge"); S.k.m = await api("knowledge/map?" + mapQuery()); if (!keep) { S.k.e = null; S.k.grp = null; kHash(null); } render(); };
   const words = (name) => name.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase();
-  const LCOL = { industry: "#2c62c9", domain: "#1b7f52", solution: "#ee6c2b", customer: "#7a4fb5", added: "#7a8496" };
+  const LCOL = { industry: "#2563eb", domain: "#0d9488", solution: "#7c3aed", customer: "#db2777", added: "#7a8496" };   // the four levels, in KB Forge's colours
   const LVL = { industry: "Industry", domain: "Domain", solution: "Solution", customer: "Customer", added: "Added" };
   const kShort = (name) => String(name).split(": ")[0];   // an article is named with its subject ("UCP 600 article 14(c): presentation within 21 days"); a chip shows the reference
-  const dot = (type, level) => h("i", { class: "kdot", style: "background:" + (KCOL[type] || LCOL[level] || "#7a8496") });
+  const dot = (type, level) => h("i", { class: "kdot", style: "background:" + (LCOL[level] || KCOL[type] || "#7a8496") });
   const kchip = (node, label, title) => h("button", { class: "kchip", type: "button", style: "border-left-color:" + (LCOL[node.level] || "#7a8496"), title: title || words(node.type || "") + ", " + (LVL[node.level] || "added").toLowerCase() + " level: open it in the knowledge graph", onclick: kShow(node.id) }, label);
   const statusPills = (by) => ["fail", "missing", "review", "pass", "info"].filter((s) => by[s]).map((s) => pill(s, by[s] + " " + s));
-  function levelMap() {   // KB Forge's level map: the levels as boxes, stacked top-down, each level's band to its right; drilling only goes down
-    const m = S.k.m, W = 940, BOX = 168, X0 = BOX + 22, LAB = 104, PER = 4, COL = (W - X0 - LAB - 10) / PER, ROW = 36, sel = S.k.e ? S.k.e.entity.id : null, pos = {}, bands = [];
-    const trail = S.k.e ? S.k.e.trail.map((x) => x.id) : [], onTrail = new Set(trail), hide = S.k.hide || [];
-    const shown = m.nodes.filter((n) => !hide.includes(n.type) || n.id === sel || onTrail.has(n.id));
-    let y = 8;
-    m.levels.forEach((lv) => {
-      const nodes = shown.filter((n) => n.level === lv.id).sort((a, b) => a.depth - b.depth || a.type.localeCompare(b.type) || (a.from || "").localeCompare(b.from || "") || a.name.localeCompare(b.name));
-      let row = -1, col = 0, kind = null; const rows = [];
-      nodes.forEach((n) => { const k = n.depth + ":" + n.type; if (k !== kind) { row++; col = 0; kind = k; rows.push({ row, type: n.type }); } else if (col >= PER) { row++; col = 0; } pos[n.id] = { x: X0 + LAB + 10 + col * COL, y: y + 26 + row * ROW }; col++; });
-      const heads = nodes.filter((n) => !n.from).length, rest = m.open.includes(lv.id) && lv.heads > heads ? lv.heads - heads : 0;   // a level shows its best connected heads; the rest are a search away
-      const hgt = Math.max(74, 26 + (row + 1) * ROW + 4 + (rest ? 14 : 0));
-      bands.push({ lv, y, hgt, nodes, rows, rest, heads, open: m.open.includes(lv.id) }); y += hgt + 10;
-    });
-    const H = y, near = new Set(m.links.filter((l) => l.s === sel || l.o === sel).flatMap((l) => [l.s, l.o]));
-    const toggle = (id) => { S.k.touched = true; S.k.open = S.k.open.includes(id) ? S.k.open.filter((x) => x !== id) : [...S.k.open, id]; kMap()(); };
-    const drill = (n) => run(async () => { S.k.touched = true; S.k.more = null; S.k.drill = S.k.drill.includes(n.id) ? S.k.drill.filter((x) => x !== n.id) : n.below ? [...S.k.drill, n.id] : S.k.drill; S.k.e = await api("knowledge/entity?id=" + encodeURIComponent(n.id)); S.k.m = await api("knowledge/map?" + mapQuery()); kHash(n.id); render(); });
-    const curve = (a, b) => "M" + a.x + "," + a.y + " C" + a.x + "," + (a.y + b.y) / 2 + " " + b.x + "," + (a.y + b.y) / 2 + " " + b.x + "," + b.y;
-    const cut = (t, n) => (t.length > n ? t.slice(0, n - 1) + "…" : t);
-    return h("svg", { class: "graph lmap", viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": "The knowledge graph by level" },
-      bands.map((b) => h("g", null, h("rect", { x: X0 - 6, y: b.y, width: W - X0 + 2, height: b.hgt, rx: 10, fill: LCOL[b.lv.id], opacity: 0.06 }),
-        h("g", { class: "lbox", onclick: () => toggle(b.lv.id) }, h("rect", { x: 4, y: b.y, width: BOX, height: b.hgt, rx: 10, fill: "#fff", stroke: LCOL[b.lv.id], "stroke-width": b.open ? 2 : 1.2 }), h("rect", { x: 4, y: b.y, width: 6, height: b.hgt, rx: 3, fill: LCOL[b.lv.id] }),
-          h("text", { x: 22, y: b.y + 25, class: "lname" }, b.lv.name), h("text", { x: 22, y: b.y + 43, class: "lsub" }, b.lv.entities.toLocaleString() + " entities · " + b.lv.heads + " at its head"),
-          h("text", { x: 22, y: b.y + 60, class: "lsub", fill: LCOL[b.lv.id] }, b.open ? "− close this level" : "+ open this level"), h("title", null, b.lv.say)),
-        b.rows.map((r) => h("text", { x: X0 + 6, y: b.y + 30 + r.row * ROW, class: "lrow" }, cut(words(r.type), 18))),
-        b.rest ? h("text", { x: X0 + 6, y: b.y + b.hgt - 7, class: "lsub" }, "The " + b.heads + " best connected of " + b.lv.heads.toLocaleString() + " at the head of this level. Search for any other.") : null,
-        !b.nodes.length ? h("text", { x: X0 + 12, y: b.y + 41, class: "lsub" }, b.lv.entities ? "Closed. Click the box to open it." : "Nothing at this level yet." + (b.lv.id === "customer" ? " It fills as cases are assessed." : "")) : null)),
-      m.links.filter((l) => pos[l.s] && pos[l.o]).map((l) => { const tree = shown.some((n) => (n.id === l.s && n.from === l.o) || (n.id === l.o && n.from === l.s)), hot = l.s === sel || l.o === sel;
-        if (!tree && !hot && shown.length > 60) return null;   // a full map shows what hangs under what, and every link of the node that is open
-        return h("path", { d: curve(pos[l.s], pos[l.o]), fill: "none", stroke: hot ? "#ee6c2b" : "#9aa3b2", "stroke-width": hot ? 1.6 : 1, opacity: hot ? 0.95 : tree ? (shown.length > 60 ? 0.3 : 0.5) : 0.13, "stroke-dasharray": tree || hot ? "" : "3 3" }, h("title", null, words(l.p))); }),
-      trail.slice(1).map((id, i) => (pos[trail[i]] && pos[id] ? h("path", { class: "ltrail", d: curve(pos[trail[i]], pos[id]) }, h("title", null, "The way down to " + S.k.e.entity.name)) : null)),
-      shown.map((n) => h("g", { class: "nd" + (n.id === sel ? " sel" : onTrail.has(n.id) ? " way" : ""), transform: "translate(" + pos[n.id].x + "," + pos[n.id].y + ")", onclick: drill(n) },
-        h("rect", { x: -11, y: -13, width: COL - 6, height: 30, rx: 6, fill: n.id === sel ? "#fdf1e9" : "#fff", stroke: n.id === sel ? "#ee6c2b" : "none", opacity: n.id === sel ? 1 : 0.001 }),
-        n.drilled || onTrail.has(n.id) ? h("circle", { r: 10.5, fill: "none", stroke: onTrail.has(n.id) ? "#ee6c2b" : LCOL[n.level], "stroke-width": onTrail.has(n.id) ? 2 : 1.5 }) : null,
-        h("circle", { r: 6.5, fill: KCOL[n.type] || LCOL[n.level], stroke: "#fff", "stroke-width": 1.5, opacity: sel && !near.has(n.id) && n.id !== sel && !onTrail.has(n.id) ? 0.5 : 1, "stroke-dasharray": n.stub ? "2 2" : "" }),
-        h("text", { x: 14, y: n.below || n.more ? 1 : 4 }, cut(kShort(n.name), 22)), n.more ? h("text", { x: 14, y: 13, class: "plus" }, n.more + " more below, not shown") : n.below ? h("text", { x: 14, y: 13, class: "plus" }, n.drilled ? "− " + n.below + " shown below" : "+ " + n.below + " below") : null,
-        h("title", null, words(n.type) + ": " + n.name + (n.below ? " · " + n.below + " below it" : "")))));
+  const plural = (type, n) => { const w = words(type).replace(/^./, (c) => c.toUpperCase()); return n === 1 ? w : /kpi$/i.test(w) ? "KPIs" : /(s|x|ch)$/.test(w) ? w + "es" : /[^aeiou]y$/.test(w) ? w.slice(0, -1) + "ies" : w + "s"; };
+  const ICON = { layers: ["m12 2 10 5-10 5L2 7l10-5ZM2 17l10 5 10-5M2 12l10 5 10-5"], up: ["M12 19V5M5 12l7-7 7 7"], down: ["M12 5v14M19 12l-7 7-7-7"], home: ["M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1v-9.5Z"], close: ["M18 6 6 18M6 6l12 12"],
+    plus: ["M12 5v14M5 12h14"], minus: ["M5 12h14"], fit: ["M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"], search: ["M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14ZM21 21l-4.3-4.3"], eye: ["M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z", "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"],
+    eyeoff: ["M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z", "M3 3l18 18"], reset: ["M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"], filter: ["M3 5h18l-7 8v6l-4-2v-4L3 5Z"], compass: ["M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z", "m16 8-2.5 5.5L8 16l2.5-5.5L16 8Z"], chev: ["m9 6 6 6-6 6"], link: ["M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"] };
+  const ico = (name, size) => h("svg", { width: size || 13, height: size || 13, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": 1.8, "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" }, ICON[name].map((d) => h("path", { d })));
+
+  /* The tidy tree, as KB Forge's explorer lays a view out: each entity over its children in a grid whose columns are as wide as the longest
+     name, the children of one kind starting a line of their own, and the links drawn as connectors (down from under the parent's name to
+     its bus, along it, and down into each child). The positions are computed, not settled by forces: the same scene always looks the same. */
+  const GW = 176, GH = 48, BUS_GAP = 24, DROP = 18, COL_GAP = 28, BLOCK_GAP = 56, MAX_COLS = 8, MAX_KINDS = 10, CHAIN_LEFT = 132, BAND_GAP = 56, LABEL_WIDTH = 26, LABEL_LINES = 3;
+  const nodeRadius = (degree) => 9 + Math.min(11, Math.sqrt(degree || 0) * 2.4);
+  function labelLines(text) {
+    const ws = String(text).split(/\s+/).filter(Boolean), lines = []; let i = 0;
+    while (i < ws.length && lines.length < LABEL_LINES) { let line = ws[i]; i++; while (i < ws.length && (line + " " + ws[i]).length <= LABEL_WIDTH) { line += " " + ws[i]; i++; } lines.push(line.length > LABEL_WIDTH ? line.slice(0, LABEL_WIDTH - 1) + "…" : line); }
+    if (i < ws.length && lines.length) { const last = lines[lines.length - 1].replace(/…$/, ""); lines[lines.length - 1] = (last.length >= LABEL_WIDTH ? last.slice(0, LABEL_WIDTH - 1) : last) + "…"; }
+    return lines;
+  }
+  function textWidth(text, size) {
+    let em = 0;
+    for (const ch of text) em += ch === " " ? 0.32 : ch >= "A" && ch <= "Z" ? 0.72 : ch >= "a" && ch <= "z" ? 0.6 : ch >= "0" && ch <= "9" ? 0.62 : ".,:;'!|()[]".includes(ch) ? 0.32 : ch === "—" ? 1 : 0.65;
+    return em * (size || 11);
+  }
+  const tidyNode = (label, r) => { const lines = labelLines(label), widest = lines.reduce((m, l) => Math.max(m, textWidth(l)), 0); return { r, half: Math.max(r + 6, widest / 2 + 4), below: r + 14 + Math.max(0, lines.length - 1) * 12.5 + 5 }; };
+  const maxOf = (xs) => xs.reduce((m, x) => Math.max(m, x), -Infinity);
+  function gridColumns(sizes, cell, line, area, above, most) {
+    const total = sizes.reduce((a, b) => a + b, 0);
+    if (total <= 1) return 1;
+    let best = 1, bestScore = -Infinity;
+    for (let cols = 1; cols <= Math.min(maxOf(sizes), most); cols++) { const lines = sizes.reduce((sum, x) => sum + Math.ceil(x / cols), 0), k = Math.min(area.w / (cols * cell), area.h / (above + lines * line), 1.1), score = k - lines * 0.004; if (score > bestScore + 1e-9) { bestScore = score; best = cols; } }
+    return sizes.length === 1 ? Math.ceil(total / Math.ceil(total / best)) : best;
+  }
+  const gridLines = (items, cols) => { const out = [], step = Math.max(1, cols); for (let i = 0; i < items.length; i += step) out.push(items.slice(i, i + step)); return out; };
+  function tidyLayout(input) {
+    const pos = {}, routes = {}, captions = [], node = input.node, area = input.area, boxes = input.boxes || [];
+    const claimed = new Set([...boxes, ...input.tops]), kidsOf = {}, queue = [...boxes, ...input.tops];   // each entity once, under the first parent that reaches it
+    for (let i = 0; i < queue.length; i++) { const id = queue[i], list = input.childrenOf(id).filter((c) => !claimed.has(c)); list.forEach((c) => claimed.add(c)); kidsOf[id] = list; queue.push(...list); }
+    const open = (id) => (kidsOf[id] || []).length > 0;
+    function family(parent, list, below) {   // the children under a parent (null: the tops), `below` being how far the parent's drawing reaches under its centre
+      const bus0 = below + BUS_GAP, ns = list.map(node), cell = 2 * maxOf(ns.map((n) => n.half)) + COL_GAP, rMax = maxOf(ns.map((n) => n.r)), belowMax = maxOf(ns.map((n) => n.below));
+      let groups = [];
+      for (const c of list) { const last = groups[groups.length - 1]; if (last && input.kindOf(last[0]) === input.kindOf(c)) last.push(c); else groups.push([c]); }
+      if (groups.length > MAX_KINDS) groups = [groups.reduce((a, g) => a.concat(g), [])];
+      let captionW = 0; const heads = {};
+      if (groups.length > 1) { groups.forEach((g) => (heads[g[0]] = g.length)); captionW = maxOf(groups.map((g) => textWidth(input.caption(g[0], g.length), 10))) + 20; }
+      const cols = gridColumns(groups.map((g) => g.length), cell, rMax + belowMax + BUS_GAP + DROP, { w: Math.max(200, area.w - captionW), h: area.h }, parent === null ? 0 : 2 * (bus0 + DROP), parent === null ? Math.max(MAX_COLS, Math.ceil(Math.sqrt(list.length) * 1.4)) : MAX_COLS);
+      const fams = {}; list.forEach((c) => { if (open(c)) fams[c] = family(c, kidsOf[c], node(c).below); });   // what is open: each one's own family, as wide as its slot in the line must be
+      const nFams = Object.keys(fams).length, slot = (c) => Math.max(cell, fams[c] ? fams[c].w + BLOCK_GAP : 0), room = Math.max(cols * cell, area.w / 0.62) * 2.5, lines = [];
+      for (const g of groups) for (const line of gridLines(g, cols)) { let cur = [], w = 0; for (const c of line) { const sw = slot(c); if (cur.length && w + sw > room) { lines.push(cur); cur = []; w = 0; } cur.push(c); w += sw; } if (cur.length) lines.push(cur); }
+      let top = parent === null ? 0 : bus0 + DROP, hgt = below; const lineY = [], lineBus = [], lineBelow = [], lineW = [];
+      for (const line of lines) {   // down the lines: each line, then the families of what is open in it, below its names
+        const r = maxOf(line.map((c) => node(c).r)), lb = maxOf(line.map((c) => node(c).below)), y = top + r;
+        lineBus.push(top - DROP); lineY.push(y); lineBelow.push(lb); lineW.push(line.reduce((sum, c) => sum + slot(c), 0));
+        let bottom = y + lb; for (const c of line) if (fams[c]) bottom = Math.max(bottom, y + (lb - node(c).below) + fams[c].h);
+        hgt = Math.max(hgt, bottom); top = bottom + BUS_GAP + DROP;
+      }
+      const slotsW = maxOf(lineW), inner = captionW + slotsW, nHeads = Object.keys(heads).length, edge = nFams > 0 && lines.length > 1;
+      const trunkDx = edge ? -inner / 2 - 16 : nHeads ? captionW / 2 - slotsW / 2 : captionW / 2 + (cols % 2 === 0 ? 0 : cell / 2);   // the trunk to the lines below the first: between two columns, or down a left edge
+      return { w: inner + (edge ? 32 : 0), h: hgt, place: (cx, py, drop) => {
+        const gx = cx + captionW / 2, slotsLeft = gx - slotsW / 2; drop = drop || 0;
+        lines.forEach((line, i) => {
+          const y = py + drop + lineY[i], free = edge || nHeads > 0 || nFams > 0 || i === lines.length - 1;
+          let x = free ? gx - lineW[i] / 2 : slotsLeft + Math.floor((cols - line.length) / 2) * cell; const first = x + slot(line[0]) / 2;
+          for (const c of line) { const sw = slot(c), at = x + sw / 2; pos[c] = { x: at, y };
+            if (parent !== null) routes[c] = i === 0 ? { parent, busUp: lineY[0] - lineBus[0] } : { parent, busUp: lineY[i] - lineBus[i], trunk: { dx: trunkDx, down: bus0 + drop } };
+            if (fams[c]) fams[c].place(at, y, lineBelow[i] - node(c).below); x += sw; }
+          if (heads[line[0]] !== undefined) captions.push({ anchor: line[0], dx: slotsLeft - 12 - first, text: input.caption(line[0], heads[line[0]]) });
+        });
+      } };
+    }
+    if (boxes.length) {   // the levels, top-down: each box on the spine at the left, what it opened in a band to its right, then the next box under the band
+      let y = 0;
+      for (const b of boxes) { const bn = node(b); pos[b] = { x: 0, y }; const list = kidsOf[b] || [];
+        if (!list.length) { y += 2 * bn.below + BAND_GAP; continue; }
+        const fam = family(b, list, bn.below), cx = CHAIN_LEFT + fam.w / 2; fam.place(cx, y);
+        list.forEach((c) => { if (routes[c]) routes[c] = Object.assign({}, routes[c], { side: { dx: cx } }); });
+        y += fam.h + BAND_GAP + bn.below; }
+      if (input.tops.length) { const fam = family(null, input.tops, 0); fam.place(CHAIN_LEFT + fam.w / 2, y); }
+    } else if (input.tops.length) family(null, input.tops, 0).place(0, 0);
+    return { pos, routes, captions };
+  }
+  function roundedPath(points, radius) {   // a polyline as an SVG path with its corners rounded
+    const q = []; for (const p of points) { const last = q[q.length - 1]; if (!last || Math.abs(last.x - p.x) > 0.05 || Math.abs(last.y - p.y) > 0.05) q.push(p); }
+    const f = (n) => n.toFixed(1); if (!q.length) return "";
+    let d = "M" + f(q[0].x) + "," + f(q[0].y);
+    for (let i = 1; i < q.length - 1; i++) { const a = q[i - 1], b = q[i], c = q[i + 1], l1 = Math.hypot(b.x - a.x, b.y - a.y), l2 = Math.hypot(c.x - b.x, c.y - b.y), r = Math.min(radius, l1 / 2, l2 / 2);
+      d += " L" + f(b.x + ((a.x - b.x) / l1) * r) + "," + f(b.y + ((a.y - b.y) / l1) * r) + " Q" + f(b.x) + "," + f(b.y) + " " + f(b.x + ((c.x - b.x) / l2) * r) + "," + f(b.y + ((c.y - b.y) / l2) * r); }
+    if (q.length > 1) d += " L" + f(q[q.length - 1].x) + "," + f(q[q.length - 1].y);
+    return d;
+  }
+  function routePath(route, p, c, parent, child) {   // a child's connector from where its parent and it are: out of a box's side or down from under a name, along the bus, down the trunk when it has one, and into it
+    const end = { x: c.x, y: c.y - child.r - 2 }, bus = c.y - route.busUp, ox = route.side ? p.x + route.side.dx : p.x;
+    const head = route.side ? [{ x: p.x + parent.half, y: p.y }, { x: ox, y: p.y }] : [{ x: p.x, y: p.y + parent.below + 2 }];
+    if (!route.trunk) return roundedPath([...head, { x: ox, y: bus }, { x: c.x, y: bus }, end], 7);
+    const bus0 = p.y + route.trunk.down, tx = ox + route.trunk.dx;
+    return roundedPath([...head, { x: ox, y: bus0 }, { x: tx, y: bus0 }, { x: tx, y: bus }, { x: c.x, y: bus }, end], 7);
+  }
+  function forceLayout(ids, links, half) {   // Fruchterman-Reingold with a deterministic start, then names are kept off each other: the same scene settles the same way
+    const n = ids.length || 1, k = 150, W = Math.sqrt(n * k * k * 1.9), H = W * 0.66, pos = {};
+    ids.forEach((id, i) => { const t = i * 2.399963, r = Math.sqrt((i + 0.5) / n) * Math.min(W, H) * 0.5; pos[id] = { x: r * Math.cos(t) * 1.35, y: r * Math.sin(t) }; });
+    const its = n > 160 ? 140 : 280;
+    for (let it = 0; it < its; it++) {
+      const f = {}, temp = 46 * (1 - it / its) + 0.6; ids.forEach((id) => (f[id] = { x: 0, y: 0 }));
+      for (let i = 0; i < ids.length; i++) for (let j = i + 1; j < ids.length; j++) { const a = pos[ids[i]], b = pos[ids[j]], dx = a.x - b.x || 0.01, dy = a.y - b.y || 0.01, d = Math.max(Math.hypot(dx, dy), 6), rp = (k * k) / d; f[ids[i]].x += (dx / d) * rp; f[ids[i]].y += (dy / d) * rp; f[ids[j]].x -= (dx / d) * rp; f[ids[j]].y -= (dy / d) * rp; }
+      links.forEach(([s, o]) => { const a = pos[s], b = pos[o]; if (!a || !b) return; const dx = a.x - b.x, dy = a.y - b.y, d = Math.max(Math.hypot(dx, dy), 6), at = (d * d) / (k * 1.6); f[s].x -= (dx / d) * at; f[s].y -= (dy / d) * at; f[o].x += (dx / d) * at; f[o].y += (dy / d) * at; });
+      ids.forEach((id) => { const p = pos[id], v = f[id], m = Math.hypot(v.x, v.y) || 1; p.x += (v.x / m) * Math.min(m, temp) - p.x * 0.01; p.y += (v.y / m) * Math.min(m, temp) - p.y * 0.016; });
+    }
+    for (let it = 0; it < 60; it++) { let moved = false;   // a name needs its width and three lines of height
+      for (let i = 0; i < ids.length; i++) for (let j = i + 1; j < ids.length; j++) { const a = pos[ids[i]], b = pos[ids[j]], wx = half(ids[i]) + half(ids[j]) + 8, wy = 46, dx = b.x - a.x, dy = b.y - a.y, ox = wx - Math.abs(dx), oy = wy - Math.abs(dy);
+        if (ox > 0 && oy > 0) { moved = true; if (ox * 0.6 < oy) { const m = (ox / 2) * (dx < 0 ? -1 : 1); a.x -= m; b.x += m; } else { const m = (oy / 2) * (dy < 0 ? -1 : 1); a.y -= m; b.y += m; } } }
+      if (!moved) break; }
+    return pos;
+  }
+  function radialLayout(centre, ids, links) {   // ring by ring around what is selected (the levels, when nothing is): what is one link away, then two, each ring wide enough for its names
+    const adj = {}; ids.forEach((id) => (adj[id] = [])); links.forEach(([a, b]) => { if (adj[a] && adj[b]) { adj[a].push(b); adj[b].push(a); } });
+    const ring = {}, rings = [centre.filter((c) => adj[c])]; rings[0].forEach((c) => (ring[c] = 0));
+    for (let d = 0; rings[d] && rings[d].length; d++) { const next = []; rings[d].forEach((id) => adj[id].forEach((x) => { if (ring[x] === undefined) { ring[x] = d + 1; next.push(x); } })); if (next.length) rings.push(next); else break; }
+    const rest = ids.filter((id) => ring[id] === undefined); if (rest.length) rings.push(rest);
+    const pos = {}; let r = 0;
+    rings.forEach((list, d) => { r = d === 0 ? (list.length > 1 ? Math.max(130, (list.length * 215) / (2 * Math.PI)) : 0) : Math.max(r + 150, (list.length * 96) / (2 * Math.PI));
+      list.forEach((id, i) => { const a = -Math.PI / 2 + (2 * Math.PI * (i + (d % 2 ? 0.5 : 0))) / list.length; pos[id] = { x: r * Math.cos(a) * 1.25, y: r * Math.sin(a) }; }); });
+    return pos;
+  }
+
+  /* The explorer: the knowledge graph drawn as KB Forge's Explore screen draws its level map. The levels are boxes on a spine, each
+     heads the entities it opened; an entity is a circle in its level's colour with its name under it and +N for what is still to open below
+     it; a double-click drills down. The same scene in three layouts (Layered: the tidy tree; Force; Radial), on a canvas that pans and zooms. */
+  let kLay = null, kTap = { id: null, t: 0 };
+  const kWide = () => (S.k.cw || Math.max(640, document.documentElement.clientWidth - 54));
+  const kLeftOpen = () => (S.k.left === null ? kWide() >= 1180 : S.k.left);   // on a narrow canvas the filters start closed, so the graph has the room
+  const kArea = () => ({ w: kWide(), h: Math.max(500, window.innerHeight - 188), left: kLeftOpen() ? 306 : 14, right: S.k.e || S.k.grp ? 396 : 14, top: 80, bottom: 46 });
+  function kScene() {   // what is on the scene, as a forest: the levels' boxes, the heads each opened, and under each entity what was drilled open
+    const m = S.k.m, sel = S.k.e ? S.k.e.entity.id : null, keep = new Set(S.k.e ? S.k.e.trail.map((x) => x.id) : []), hide = new Set(S.k.hideT || []), by = {}, shown = {};
+    m.nodes.forEach((n) => (by[n.id] = n));
+    const isShown = (n) => { if (shown[n.id] === undefined) { shown[n.id] = true; shown[n.id] = (!hide.has(n.type) || keep.has(n.id) || n.id === sel) && (!n.from || !by[n.from] || isShown(by[n.from])); } return shown[n.id]; };
+    const nodes = m.nodes.filter(isShown), ids = new Set(nodes.map((n) => n.id)), kids = {}, tops = [], boxes = m.levels.map((l) => "level:" + l.id);
+    nodes.forEach((n) => { const p = n.from && ids.has(n.from) ? n.from : !n.from && m.open.includes(n.level) ? "level:" + n.level : null; if (p) (kids[p] = kids[p] || []).push(n.id); else tops.push(n.id); });
+    Object.keys(kids).forEach((p) => { const order = []; kids[p].forEach((c) => { if (!order.includes(by[c].type)) order.push(by[c].type); }); kids[p] = kids[p].map((c, i) => [c, i]).sort((a, b) => order.indexOf(by[a[0]].type) - order.indexOf(by[b[0]].type) || a[1] - b[1]).map((x) => x[0]); });
+    const parentOf = {}; Object.keys(kids).forEach((p) => kids[p].forEach((c) => (parentOf[c] = p)));
+    return { m, by, nodes, ids, kids, tops, boxes, parentOf, trail: keep, sel };
+  }
+  function kLayout(sc) {
+    const a = kArea(), free = { w: Math.max(320, a.w - a.left - 396), h: Math.max(260, a.h - a.top - a.bottom) }, mode = S.k.layout || "layered";   // laid out for the canvas with the inspector open, so selecting an entity moves nothing
+    const key = [mode, Math.round(free.w / 40), Math.round(free.h / 40), sc.m.open.join(","), sc.nodes.map((n) => n.id + ">" + (sc.parentOf[n.id] || "")).join("|"), S.k.every ? 1 : 0, mode === "radial" ? (sc.sel || S.k.grp || "") : ""].join("#");
+    if (kLay && kLay.key === key) return kLay;
+    const tn = {}, node = (id) => tn[id] || (tn[id] = id.startsWith("level:") ? { r: GH / 2, half: GW / 2, below: GH / 2 } : tidyNode(kShort(sc.by[id].name), nodeRadius(sc.by[id].degree)));
+    const childrenOf = (id) => sc.kids[id] || [];
+    let pos = {}, routes = {}, captions = [];
+    if (mode === "layered") { const out = tidyLayout({ tops: sc.tops, boxes: sc.boxes, childrenOf, node, area: free, kindOf: (id) => (sc.by[id] ? sc.by[id].type : "level"), caption: (first, n) => plural(sc.by[first].type, n) + " · " + n }); pos = out.pos; routes = out.routes; captions = out.captions; }
+    else { const ids = [...sc.boxes, ...sc.nodes.map((n) => n.id)], links = Object.keys(sc.parentOf).map((c) => [sc.parentOf[c], c]);
+      if (mode === "radial") { sc.boxes.slice(1).forEach((b, i) => links.push([sc.boxes[i], b])); pos = radialLayout(sc.sel && sc.ids.has(sc.sel) ? [sc.sel] : S.k.grp ? ["level:" + S.k.grp] : sc.boxes, ids, links); }
+      else { if (S.k.every) sc.m.links.forEach((l) => { if (sc.ids.has(l.s) && sc.ids.has(l.o)) links.push([l.s, l.o]); }); pos = forceLayout(ids, links, (id) => node(id).half); } }
+    return (kLay = { key, pos, routes, captions, node, mode });
+  }
+  function kBox(lay, ids) { let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity; ids.forEach((id) => { const p = lay.pos[id], n = lay.node(id); if (!p) return; x0 = Math.min(x0, p.x - n.half); x1 = Math.max(x1, p.x + n.half); y0 = Math.min(y0, p.y - n.r - 8); y1 = Math.max(y1, p.y + n.below); });
+    (lay.captions || []).forEach((c) => { if (ids.includes(c.anchor) && lay.pos[c.anchor]) x0 = Math.min(x0, lay.pos[c.anchor].x + c.dx - textWidth(c.text, 10) - 4); });   // a kind's caption, left of its line, is part of what is shown
+    return { x0, y0, x1, y1 }; }
+  function kFit(lay, sc, focus, only, most) {   // the transform that shows the scene (or only these) in what the panels leave free of the canvas
+    const a = kArea(), mg = 20, aw = Math.max(120, a.w - a.left - a.right - 2 * mg), ah = Math.max(120, a.h - a.top - a.bottom - 2 * mg), ids = (only || Object.keys(lay.pos)).filter((id) => lay.pos[id]);
+    if (!ids.length) return { x: a.w / 2, y: a.h / 2, k: 1 };
+    const at = (b, k) => ({ k, x: a.left + mg + aw / 2 - ((b.x0 + b.x1) / 2) * k, y: a.top + mg + ah / 2 - ((b.y0 + b.y1) / 2) * k }), fitK = (b) => Math.min(aw / Math.max(1, b.x1 - b.x0), ah / Math.max(1, b.y1 - b.y0));
+    const all = kBox(lay, ids), k = Math.min(most || 1.2, fitK(all));
+    if (only || k >= 0.62 || !focus || !lay.pos[focus]) return at(all, Math.max(0.15, k));
+    if (sc && lay.mode === "layered") {   // a scene too large to read whole: what was asked for with what it opened, else with what it sits among, at a size that reads
+      const own = (sc.kids[focus] || []).length ? kBox(lay, [focus, ...sc.kids[focus]]) : null, up = sc.parentOf[focus], among = up ? kBox(lay, [up, ...(sc.kids[up] || [])]) : null;
+      if (own && fitK(own) >= 0.55) return at(own, Math.min(1, fitK(own)));
+      if (among && fitK(among) >= 0.55) return at(among, Math.min(1, fitK(among))); }
+    const p = lay.pos[focus]; return at({ x0: p.x, x1: p.x, y0: p.y + 40, y1: p.y + 40 }, 0.85);
+  }
+  const kInView = (lay, ids, t) => { const a = kArea(); return ids.every((id) => { const p = lay.pos[id], n = lay.node(id); if (!p) return true; return (p.x - n.half) * t.k + t.x >= a.left && (p.x + n.half) * t.k + t.x <= a.w - a.right && (p.y - n.r) * t.k + t.y >= a.top && (p.y + n.below) * t.k + t.y <= a.h - a.bottom; }); };
+  const kTfText = (t) => "translate(" + t.x.toFixed(1) + " " + t.y.toFixed(1) + ") scale(" + t.k.toFixed(4) + ")";
+  function kApplyTf() { const svg = document.querySelector("svg.gx-svg"); if (!svg || !S.k.tf) return; svg.querySelector("#gx-view").setAttribute("transform", kTfText(S.k.tf)); svg.querySelector("#gx-grid").setAttribute("patternTransform", kTfText(S.k.tf)); }
+  function kZoom(f, at) { const a = kArea(), t = S.k.tf; if (!t) return; S.k.focus = null; S.k.auto = false; const mx = at ? at.x : (a.left + a.w - a.right) / 2, my = at ? at.y : (a.top + a.h - a.bottom) / 2, k2 = Math.min(3, Math.max(0.15, t.k * f)); S.k.tf = { k: k2, x: mx - (mx - t.x) * (k2 / t.k), y: my - (my - t.y) * (k2 / t.k) }; kApplyTf(); }
+  const kAnchor = (id) => { const p = kLay && kLay.pos[id], t = S.k.tf; S.k.focus = null; S.k.anchor = p && t ? { id, sx: p.x * t.k + t.x, sy: p.y * t.k + t.y } : null; };
+  const kUnder = (roots) => { const under = new Set(roots); let grew = true; while (grew) { grew = false; S.k.m.nodes.forEach((x) => { if (x.from && under.has(x.from) && !under.has(x.id)) { under.add(x.id); grew = true; } }); } return under; };
+  const kDrill = (n, want) => run(async () => {   // open what is below an entity, or take it off the scene again (with everything opened under it); either way it is the one in the inspector
+    const isOpen = S.k.drill.includes(n.id), other = !S.k.e || S.k.e.entity.id !== n.id;
+    if (want === undefined ? isOpen : !want) { if (isOpen) { const under = kUnder([n.id]); under.delete(n.id); S.k.drill = S.k.drill.filter((x) => x !== n.id && !under.has(x)); if (S.k.e && under.has(S.k.e.entity.id)) S.k.e = null; } }
+    else if (n.below && !isOpen) S.k.drill = [...S.k.drill, n.id];
+    else if (!other) return;
+    kAnchor(n.id); S.k.grew = n.id;
+    const [m, e] = await Promise.all([api("knowledge/map?" + mapQuery()), other || !S.k.e ? api("knowledge/entity?id=" + encodeURIComponent(n.id)) : S.k.e]);
+    S.k.m = m; S.k.e = e; S.k.grp = null; S.k.more = null; kHash(n.id); render();
+  });
+  const kLevel = (id, want) => run(async () => {   // open a level to the entities that head it, or close it (with everything drilled open under them)
+    const isOpen = S.k.open.includes(id);
+    if (want === undefined ? isOpen : !want) { if (!isOpen) return; const under = kUnder(S.k.m.nodes.filter((x) => !x.from && x.level === id).map((x) => x.id)); S.k.drill = S.k.drill.filter((x) => !under.has(x)); S.k.open = S.k.open.filter((x) => x !== id); if (S.k.e && under.has(S.k.e.entity.id)) { S.k.e = null; kHash(null); } }
+    else if (!isOpen) S.k.open = [...S.k.open, id]; else return;
+    kAnchor("level:" + id); S.k.grew = "level:" + id; await kMapNow();
+  });
+  const kTop = () => run(async () => { S.k.open = S.k.ov.levels.map((l) => l.id); S.k.drill = []; S.k.e = null; S.k.grp = null; S.k.hideT = []; S.k.tf = null; S.k.auto = true; S.k.focus = null; S.k.anchor = null; kHash(null); await kMapNow(); });
+  function kCanvas(sc, lay) {
+    const m = sc.m, a = kArea(), sel = sc.sel, grp = S.k.grp, onTrail = sc.trail, pos = lay.pos, tidy = lay.mode === "layered", lv = Object.fromEntries(m.levels.map((l) => [l.id, l]));
+    const frame = a.left + ":" + a.right + ":" + a.w + ":" + a.h;
+    if (S.k.anchor && pos[S.k.anchor.id] && S.k.tf) {   // after opening or closing something: a scene that still reads whole is shown whole; a larger one keeps what was opened where it was on the screen
+      const whole = S.k.auto ? kFit(lay, sc, null) : null;
+      if (whole && whole.k >= 0.62) { S.k.tf = whole; S.k.frame = frame; S.k.grew = null; }
+      else { const p = pos[S.k.anchor.id], t = S.k.tf; S.k.tf = { k: t.k, x: S.k.anchor.sx - p.x * t.k, y: S.k.anchor.sy - p.y * t.k }; S.k.auto = false; } }
+    S.k.anchor = null;
+    if (!S.k.tf || (S.k.auto && S.k.frame !== frame)) { S.k.tf = kFit(lay, sc, S.k.focus); S.k.auto = true; S.k.frame = frame; }   // a view nobody moved follows the panels: the scene stays in what they leave free
+    if (S.k.grew && pos[S.k.grew]) { const fam = [S.k.grew, ...(sc.kids[S.k.grew] || [])];   // and what it opened is brought into view: whole when that still reads, else from its top
+      if (!kInView(lay, fam, S.k.tf)) { const t = kFit(lay, sc, null, fam, S.k.tf.k); if (t.k >= 0.55) S.k.tf = t; else { const b = kBox(lay, fam), k = Math.max(0.55, Math.min(S.k.tf.k, 1)), p = pos[S.k.grew], wide = (b.x1 - b.x0) * k > a.w - a.left - a.right - 40; S.k.tf = { k, x: (a.left + a.w - a.right) / 2 - (wide ? p.x : (b.x0 + b.x1) / 2) * k, y: a.top + 34 - b.y0 * k }; } } }
+    S.k.grew = null;
+    if (S.k.reveal && pos[S.k.reveal]) { const p = pos[S.k.reveal], n = lay.node(S.k.reveal), t = S.k.tf, x0 = (p.x - n.half) * t.k + t.x, x1 = (p.x + n.half) * t.k + t.x, y0 = (p.y - n.r) * t.k + t.y, y1 = (p.y + n.below) * t.k + t.y;   // what was selected is not left under a panel
+      const dx = x1 > a.w - a.right - 8 ? a.w - a.right - 8 - x1 : x0 < a.left + 8 ? a.left + 8 - x0 : 0, dy = y1 > a.h - a.bottom ? a.h - a.bottom - y1 : y0 < a.top ? a.top - y0 : 0; if (dx || dy) S.k.tf = { k: t.k, x: t.x + dx, y: t.y + dy }; }
+    S.k.reveal = null;
+    const tf = S.k.tf, isBox = (id) => id.startsWith("level:"), colorOf = (id) => (isBox(id) ? LCOL[id.slice(6)] : LCOL[sc.by[id].level]) || "#7a8496", rOf = (id) => lay.node(id).r;
+    const relBetween = (p, c) => m.links.filter((l) => (l.s === p && l.o === c) || (l.s === c && l.o === p));
+    const hideR = new Set(S.k.hideR || []);
+    const tap = (id, one, two) => (ev) => {   // one press shows it in the inspector; a second within a moment drills. The inspector waits that moment, so it never opens under the second press
+      ev.stopPropagation(); const now = Date.now(); clearTimeout(kTap.timer);
+      if (kTap.id === id && now - kTap.t < 450) { kTap = { id: null, t: 0 }; two(); } else kTap = { id, t: now, timer: setTimeout(() => { kTap = { id: null, t: 0 }; one(); }, 260) }; };
+    // the tree's connectors (Layered), or straight links (Force, Radial)
+    const treeLinks = Object.keys(sc.parentOf).filter((c) => pos[c] && pos[sc.parentOf[c]]).map((c) => { const p = sc.parentOf[c], path = onTrail.has(c) && (onTrail.has(p) || isBox(p)), strong = c === sel || p === sel; return { c, p, path, strong }; }).sort((x, y) => Number(x.path) - Number(y.path) || Number(x.strong) - Number(y.strong));
+    const linkWords = {}; if (S.k.labels !== false) treeLinks.forEach(({ c, p }) => { if (isBox(p)) return; relBetween(p, c).forEach((l) => { const w = (l.s === c ? "↑ " : "") + words(l.p); (linkWords[p] = linkWords[p] || []).includes(w) || linkWords[p].push(w); }); });
+    const straight = (aId, bId) => { const A = pos[aId], B = pos[bId], dx = B.x - A.x, dy = B.y - A.y, len = Math.hypot(dx, dy) || 1, ra = isBox(aId) ? 0 : rOf(aId), rb = (isBox(bId) ? 0 : rOf(bId)) + 3; return { d: "M" + (A.x + (dx / len) * ra).toFixed(1) + "," + (A.y + (dy / len) * ra).toFixed(1) + " L" + (B.x - (dx / len) * rb).toFixed(1) + "," + (B.y - (dy / len) * rb).toFixed(1), mx: (A.x + B.x) / 2, my: (A.y + B.y) / 2 }; };
+    const pairs = new Set(treeLinks.map(({ c, p }) => p + "|" + c)), loose = S.k.every ? m.links.filter((l) => pos[l.s] && pos[l.o] && sc.ids.has(l.s) && sc.ids.has(l.o) && !hideR.has(l.p) && !pairs.has(l.s + "|" + l.o) && !pairs.has(l.o + "|" + l.s)) : [];
+    const drawn = treeLinks.filter(({ p }) => !isBox(p)).length + loose.length;
+    const view = h("g", { id: "gx-view", transform: kTfText(tf) },
+      tidy ? sc.boxes.slice(0, -1).map((b, i) => h("line", { x1: pos[b].x, y1: pos[b].y + GH / 2, x2: pos[sc.boxes[i + 1]].x, y2: pos[sc.boxes[i + 1]].y - GH / 2, class: "gx-chain-link", "stroke-width": 3, opacity: 0.3, style: "stroke:" + colorOf(b) })) : null,
+      treeLinks.map(({ c, p, path, strong }) => { const box = isBox(p), cls = "gx-tree-link" + (path ? " path" : strong ? " strong" : "") + (box ? " box" : ""), rel = relBetween(p, c), title = box ? lv[p.slice(6)].name + " level → " + sc.by[c].name : rel.map((l) => sc.by[l.s].name + " → " + words(l.p) + " → " + sc.by[l.o].name).join("\n");
+        if (tidy && lay.routes[c]) return h("path", { d: routePath(lay.routes[c], pos[p], pos[c], lay.node(p), lay.node(c)), fill: "none", class: cls, "stroke-width": path ? 2.6 : strong ? 1.9 : 1.4, "stroke-dasharray": box ? "5 4" : null, style: box && !path ? "stroke:" + colorOf(p) : null }, title ? h("title", null, title) : null);
+        const up = rel.length && rel[0].s === c, g = up ? straight(c, p) : straight(p, c);
+        return h("g", null, h("path", { d: g.d, fill: "none", class: (box ? "gx-group-link" : "gx-edge-line") + (path ? " path" : strong ? " strong" : ""), "stroke-width": path ? 2.6 : strong ? 1.8 : 1.2, "stroke-dasharray": box ? "4 3" : null, style: box && !path ? "stroke:" + colorOf(p) : null, "marker-end": box ? null : "url(#gx-arrow" + (path ? "-path" : strong ? "-strong" : "") + ")" }, title ? h("title", null, title) : null),
+          !box && S.k.labels !== false && rel.length && (strong || path || sc.nodes.length <= 40) ? h("text", { x: g.mx, y: g.my - 4, "font-size": 10, "text-anchor": "middle", class: "gx-edge-text" + (path ? " path" : strong ? " strong" : "") }, words(rel[0].p)) : null); }),
+      tidy ? lay.captions.filter((c) => pos[c.anchor]).map((c) => h("text", { x: pos[c.anchor].x + c.dx, y: pos[c.anchor].y + 3.5, "font-size": 10, "text-anchor": "end", class: "gx-kind-caption" }, c.text)) : null,
+      tidy ? Object.keys(linkWords).filter((p) => pos[p]).map((p) => h("text", { x: pos[p].x + 7, y: pos[p].y + lay.node(p).below + BUS_GAP - 8, "font-size": 10, class: "gx-edge-text gx-tree-words" }, linkWords[p].slice(0, 2).join(" · ") + (linkWords[p].length > 2 ? " …" : ""))) : null,
+      loose.map((l) => { const g = straight(l.s, l.o), strong = l.s === sel || l.o === sel; return h("g", { opacity: strong || !sel ? 1 : 0.45 }, h("path", { d: g.d, fill: "none", class: "gx-edge-line" + (strong ? " sel" : ""), "stroke-width": strong ? 1.8 : 1.1, "marker-end": "url(#gx-arrow" + (strong ? "-sel" : "") + ")" }, h("title", null, sc.by[l.s].name + " → " + words(l.p) + " → " + sc.by[l.o].name)),
+        S.k.labels !== false && (strong || loose.length <= 30) ? h("text", { x: g.mx, y: g.my - 4, "font-size": 10, "text-anchor": "middle", class: "gx-edge-text" + (strong ? " sel" : "") }, words(l.p)) : null); }),
+      sc.nodes.filter((n) => pos[n.id]).map((n) => { const p = pos[n.id], r = rOf(n.id), isSel = n.id === sel, path = onTrail.has(n.id) && !isSel, color = colorOf(n.id), more = n.drilled ? n.more : n.below, ring = (n.also || []).length ? LCOL[n.also[0]] : null;
+        return h("g", { "data-node-id": n.id, transform: "translate(" + p.x.toFixed(1) + " " + p.y.toFixed(1) + ")", style: "cursor:pointer", onpointerdown: tap(n.id, kSelect(n.id), kDrill(n)) },
+          h("title", null, words(n.type) + ": " + n.name + (n.below ? " · " + n.below + " below it. Double-click to " + (n.drilled ? "close it." : "drill down.") : "")),
+          isSel || path ? h("circle", { r: r + 5, fill: "none", class: isSel ? "gx-ring-sel" : "gx-ring-path", "stroke-width": 2.5 }) : null,
+          ring ? h("circle", { r: r + 3.5, fill: "none", "stroke-width": 3, style: "stroke:" + ring }) : null,
+          h("circle", { r, class: "gx-node-circle" + (n.stub ? " stub" : ""), "stroke-width": 2, style: "fill:" + color }),
+          more > 0 ? h("g", { transform: "translate(" + (r * 0.75).toFixed(1) + " " + (-r * 0.75).toFixed(1) + ")" }, h("circle", { r: 8.5, class: "gx-more-badge", "stroke-width": 1.5, style: "stroke:" + color }), h("text", { "text-anchor": "middle", dy: "0.35em", "font-size": more > 99 ? 6.5 : 8, "font-weight": 700, class: "gx-more-text" }, more > 99 ? "99+" : "+" + more)) : null,
+          h("text", { y: r + 14, "text-anchor": "middle", "font-size": 11, "font-weight": isSel ? 650 : 500, class: "gx-node-text" }, labelLines(kShort(n.name)).map((line, i) => h("tspan", { x: 0, dy: i ? 12.5 : 0 }, line)))); }),
+      sc.boxes.filter((b) => pos[b]).map((b) => { const l = lv[b.slice(6)], p = pos[b], open = (sc.kids[b] || []).length, more = l.heads - open, isSel = grp === l.id, color = colorOf(b);
+        const counts = l.entities ? l.entities.toLocaleString() + (l.entities === 1 ? " entity" : " entities") + (l.heads && l.heads !== l.entities ? " · " + l.heads + " head" : "") + (open ? " · " + open + " open" : "") : "nothing yet";
+        return h("g", { "data-group-id": b, transform: "translate(" + p.x.toFixed(1) + " " + p.y.toFixed(1) + ")", class: "gx-group" + (open ? " open" : "") + (l.entities ? "" : " empty"), style: "cursor:pointer", role: "button", "aria-label": l.name + " level, " + counts,
+            onpointerdown: tap(b, () => { S.k.grp = l.id; S.k.e = null; kHash(null); render(); }, kLevel(l.id)) },
+          h("title", null, l.name + " — " + l.say + (l.entities ? " Double-click to " + (open ? "close." : "open.") : "")),
+          isSel ? h("rect", { x: -GW / 2 - 4, y: -GH / 2 - 4, width: GW + 8, height: GH + 8, rx: 14, fill: "none", class: "gx-ring-sel", "stroke-width": 2.5 }) : null,
+          h("rect", { x: -GW / 2, y: -GH / 2, width: GW, height: GH, rx: 12, class: "gx-group-box", "stroke-width": open ? 2.5 : 1.8, style: "stroke:" + color }), h("rect", { x: -GW / 2, y: -GH / 2, width: 8, height: GH, rx: 4, class: "gx-group-bar", style: "fill:" + color }),
+          h("text", { x: -GW / 2 + 18, y: -3, "font-size": 12.5, "font-weight": 700, class: "gx-group-title" }, l.name), h("text", { x: -GW / 2 + 18, y: 13, "font-size": 9.5, class: "gx-group-sub" }, counts),
+          more > 0 ? h("g", { transform: "translate(" + (GW / 2 - 4) + " " + (-GH / 2 + 4) + ")" }, h("circle", { r: 10, class: "gx-more-badge", "stroke-width": 1.5, style: "stroke:" + color }), h("text", { "text-anchor": "middle", dy: "0.35em", "font-size": more > 99 ? 7 : 9, "font-weight": 700, class: "gx-more-text" }, more > 99 ? "99+" : "+" + more)) : null); }));
+    const svg = h("svg", { class: "gx-svg", role: "img", "aria-label": "The knowledge graph" },
+      h("defs", null, h("pattern", { id: "gx-grid", width: 28, height: 28, patternUnits: "userSpaceOnUse", patternTransform: kTfText(tf) }, h("circle", { cx: 1, cy: 1, r: 1, class: "gx-grid-dot" })),
+        ["", "strong", "sel", "path"].map((v) => h("marker", { id: "gx-arrow" + (v ? "-" + v : ""), viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 9, markerHeight: 9, markerUnits: "userSpaceOnUse", orient: "auto-start-reverse" }, h("path", { d: "M 0 0 L 10 5 L 0 10 z", class: "gx-arrow-fill " + v })))),
+      h("rect", { width: "100%", height: "100%", fill: "url(#gx-grid)" }), view);
+    let drag = null;   // the canvas pans by dragging and zooms on the wheel, without drawing the page again
+    svg.addEventListener("pointerdown", (ev) => { if (ev.button !== 0) return; drag = { x: ev.clientX, y: ev.clientY, tx: S.k.tf.x, ty: S.k.tf.y }; try { svg.setPointerCapture(ev.pointerId); } catch (err) { /* not capturable */ } if (S.k.hits) { S.k.hits = null; const box = document.querySelector(".gx-search-list"); if (box) box.remove(); } });
+    svg.addEventListener("pointermove", (ev) => { if (!drag) return; S.k.focus = null; S.k.auto = false; S.k.tf = { k: S.k.tf.k, x: drag.tx + ev.clientX - drag.x, y: drag.ty + ev.clientY - drag.y }; kApplyTf(); });
+    const drop = () => { drag = null; }; svg.addEventListener("pointerup", drop); svg.addEventListener("pointercancel", drop);
+    svg.addEventListener("wheel", (ev) => { ev.preventDefault(); const r = svg.getBoundingClientRect(); kZoom(Math.exp(-ev.deltaY * (ev.ctrlKey ? 0.01 : 0.0016)), { x: ev.clientX - r.left, y: ev.clientY - r.top }); }, { passive: false });
+    return { svg, drawn };
   }
   const KSKIP = ["description", "graphLevel", "knowledgeLevel", "knowledgeSpace", "knowledgeSpaceId", "graphLevelIn", "citation", "jurisdiction", "title", "reference", "rationale", "status"];
   async function addUnder(e) {   // a fact by hand hangs under the node that is open, by a link the ontology has for the two kinds
@@ -298,47 +506,113 @@
     const old = () => { const t = h("textarea", { style: "position:fixed;opacity:0" }, url); document.body.appendChild(t); t.select(); try { document.execCommand("copy"); done(); } catch (err) { toast(url); } t.remove(); };
     if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(url).then(done, old); else old();
   }
-  function kPanel() {
-    const ov = S.k.ov, e = S.k.e, p = e.entity.props, net = S.k.view === "network", goTo = net ? kEntity : kShow, levelName = Object.fromEntries(ov.levels.map((l) => [l.id, l.name]));
-    const REL = Object.fromEntries(ov.relationships.map((r) => [r.name, r])), u = e.usage, first = e.trail[0];
+  const levelBadge = (id, name) => h("span", { class: "level-badge", style: "--lv:" + (LCOL[id] || "#7a8496") }, h("i", { class: "kdot", style: "width:7px;height:7px;background:" + (LCOL[id] || "#7a8496") }), name);
+  function kInspector(sc) {   // the inspector, as KB Forge's: where the entity sits and what drilling does, then what it is, what it rests on, where it is used, its links and its source
+    const ov = S.k.ov, e = S.k.e, p = e.entity.props, n = sc.by[e.entity.id], levelName = Object.fromEntries(ov.levels.map((l) => [l.id, l.name]));
+    const REL = Object.fromEntries(ov.relationships.map((r) => [r.name, r])), u = e.usage, up = n && sc.parentOf[n.id], upBox = up && up.startsWith("level:"), upName = up ? (upBox ? "the " + levelName[up.slice(6)] + " level" : kShort(sc.by[up].name)) : null;
     const groups = {}; e.links.forEach((l) => { const k = l.direction + ":" + l.predicate; (groups[k] = groups[k] || []).push(l); });
-    const linkLabel = (dir, pred) => (dir === "out" ? words(pred) : (REL[pred] || {}).inverse && REL[pred].inverse !== pred ? words(REL[pred].inverse) : words(pred) + " (to this)");
+    const linkLabel = (dir, pred) => (dir === "out" ? "→ " + words(pred) : "← " + ((REL[pred] || {}).inverse && REL[pred].inverse !== pred ? words(REL[pred].inverse) : words(pred)));
     const lists = Object.entries(p).filter(([k, v]) => Array.isArray(v) && v.length > 1 && !KSKIP.includes(k));
     const cite = [p.title, p.citation, p.reference && !String(p.citation || "").includes(p.reference) ? p.reference : null].filter(Boolean).join(" · ");
-    return h("div", { class: "card kpanel" },
-      h("nav", { class: "crumbs", "aria-label": "The way down to this node" }, h("span", { class: "lv", style: "color:" + (LCOL[first.level] || "#5d6779") }, (levelName[first.level] || "Added knowledge") + " level"),
-        e.trail.map((x, i) => [h("span", { class: "sep" }, "›"), i === e.trail.length - 1 ? h("b", null, kShort(x.name)) : h("button", { type: "button", title: words(x.type) + ": go to it", onclick: goTo(x.id) }, kShort(x.name))])),
-      h("div", { class: "row", style: "margin-top:8px;gap:6px" }, pill("plain", words(e.entity.type)), h("span", { class: "pill plain", style: "color:" + (LCOL[e.level] || "#5d6779") }, (levelName[e.level] || "Added knowledge") + " level" + ((e.also_at || []).length ? ", also " + e.also_at.map((x) => (levelName[x] || x).toLowerCase()).join(", ") : "")), pill(ORIGIN_PILL[e.origin] || "", ov.origin_words[e.origin] || e.origin),
-        p.status ? pill(p.status) : null),
-      h("p", { class: "kname" }, e.entity.name), p.description ? h("p", { class: "small" }, p.description) : null,
-      cite ? h("p", { class: "small", style: "margin-top:6px" }, h("b", null, "Cited as: "), cite) : null, p.jurisdiction ? h("p", { class: "small muted" }, p.jurisdiction) : null,
-      p.rationale ? h("p", { class: "small", style: "margin-top:6px" }, h("b", null, "Why: "), p.rationale) : null,
-      e.origin === "curated" ? h("p", { class: "knote" }, "A short summary written for this knowledge base, not the text of the source. Read the current text before relying on it.") : null,
-      e.class.definition ? h("p", { class: "small muted", style: "margin-top:6px" }, words(e.entity.type).replace(/^./, (c) => c.toUpperCase()) + ": " + e.class.definition) : null,
-      e.entity.synonyms.length ? h("div", { class: "chips", style: "margin-top:8px" }, h("span", { class: "small muted" }, "Also known as"), e.entity.synonyms.map((x) => h("span", { class: "chip" }, x))) : null,
-      lists.map(([k, v]) => [h("h3", { class: "kh" }, words(k).replace(/^./, (c) => c.toUpperCase())), steps(v)]),
-      kv(Object.entries(p).filter(([k, v]) => !KSKIP.includes(k) && v !== null && (typeof v !== "object" || (Array.isArray(v) && v.length < 2))).map(([k, v]) => [words(k), Array.isArray(v) ? v.join("; ") : String(v)])),
-      e.basis.length ? [h("h3", { class: "kh" }, e.rule ? "What its rule rests on" : "What this rule rests on"), e.rule ? h("button", { class: "lrowb", type: "button", onclick: goTo(e.rule.id) }, dot("PolicyRule"), h("span", null, "Rule: " + e.rule.name), h("em", null, "policy rule")) : null,
-        e.basis.map((b) => h("button", { class: "kbasis", type: "button", style: "border-left-color:" + (LCOL[b.level] || "#7a8496"), onclick: goTo(b.id) }, h("b", null, b.name), h("span", { class: "muted" }, " · " + (b.of ? b.of.name : words(b.type)) + (b.industries.length ? " · " + b.industries.join(", ") : "")), h("div", null, b.says)))] : null,
-      u.rules.length || u.findings ? [h("h3", { class: "kh" }, "Where it is used"),
-        u.rules.length ? [h("div", { class: "small muted", style: "margin-bottom:4px" }, u.rules.length + (u.rules.length === 1 ? " rule rests" : " rules rest") + " on it"), (S.k.more === "rules" ? u.rules : u.rules.slice(0, 5)).map((r) => h("button", { class: "lrowb", type: "button", onclick: goTo(r.id) }, dot(r.type, r.level), h("span", null, r.name), h("em", null, words(r.type)))),
-          u.rules.length > 5 ? h("button", { class: "btn sm ghost", onclick: () => { S.k.more = S.k.more === "rules" ? null : "rules"; render(); } }, S.k.more === "rules" ? "Show fewer" : "Show all " + u.rules.length) : null] : null,
-        u.findings ? [h("div", { class: "row", style: "margin:8px 0 4px;gap:6px" }, h("span", { class: "small muted" }, u.findings + (u.findings === 1 ? " finding" : " findings") + " on " + u.cases.length + (u.cases.length === 1 ? " case" : " cases")), statusPills(u.by_status)),
-          u.cases.slice(0, 6).map((c) => h("div", { class: "kcase" }, h("button", { class: "btn sm ghost mono", type: "button", title: "Open the case", onclick: run(() => open(c.name, "provenance")) }, c.name),
-            c.findings.slice(0, 8).map((f) => h("button", { class: "pill " + f.status, type: "button", title: f.name + ": go to this finding in the graph", onclick: goTo(f.id) }, f.status)), c.findings.length > 8 ? h("span", { class: "small muted" }, "+" + (c.findings.length - 8)) : null)),
-          u.cases.length > 6 ? h("p", { class: "small muted" }, "and " + (u.cases.length - 6) + " more case(s)") : null] : null] : null,
-      h("h3", { class: "kh" }, "Linked to (" + e.links.length + ")"),
-      Object.entries(groups).sort((a, b) => a[0].split(":")[1].localeCompare(b[0].split(":")[1])).map(([k, ls]) => { const [dir, pred] = k.split(":"), all = S.k.more === k;
-        return h("div", { class: "lgroup" }, h("div", { class: "lhead", title: (REL[pred] || {}).definition || "" }, linkLabel(dir, pred), h("span", { class: "muted" }, " · " + ls.length)),
-          (all ? ls : ls.slice(0, 5)).map((l) => h("button", { class: "lrowb", type: "button", onclick: goTo(l.other) }, dot(l.other_type, l.other_level), h("span", null, l.other_name), h("em", null, words(l.other_type)))),
-          ls.length > 5 ? h("button", { class: "btn sm ghost", onclick: () => { S.k.more = all ? null : k; render(); } }, all ? "Show fewer" : "Show all " + ls.length) : null); }),
-      h("h3", { class: "kh" }, "Where this came from"), e.support.length ? e.support.slice(0, 4).map((c) => h("div", { class: "src", style: "margin-bottom:4px;cursor:default" }, h("div", { class: "row" }, h("b", null, c.fileName || c.source || c.system || c.app || c.kind), h("span", { class: "muted" }, [c.locator, c.case].filter(Boolean).join(" · ")),
-        c.check ? h("span", { class: "right" }, pill({ named: "pass", quoted: "pass", read: "pass", paraphrased: "review", missing: "fail" }[c.check] || "", c.check)) : null), c.quote ? h("q", null, c.quote) : h("span", { class: "muted" }, c.text || ""))) : h("p", { class: "small muted" }, "No source recorded."),
-      e.support.length > 4 ? h("p", { class: "small muted" }, "and " + (e.support.length - 4) + " more") : null,
-      h("div", { class: "row", style: "margin-top:12px;gap:6px" }, h("button", { class: "btn sm", onclick: () => copyLink(e.entity.id) }, "Copy the link to this node"),
-        net ? h("button", { class: "btn sm", onclick: kShow(e.entity.id) }, "Show it on the level map") : h("button", { class: "btn sm", onclick: run(async () => { S.k.view = "network"; S.k.g = await api("knowledge/graph?focus=" + encodeURIComponent(e.entity.id)); render(); }) }, "Show its links as a network"),
-        e.attach.length ? h("button", { class: "btn sm", onclick: run(() => addUnder(e)) }, "Add under this") : null,
-        e.by_hand ? h("button", { class: "btn sm", onclick: run(async () => { await api("knowledge/facts/" + encodeURIComponent(e.by_hand) + "/remove", {}); toast("Taken out: " + e.entity.name); const up = e.trail.length > 1 ? e.trail[e.trail.length - 2].id : null; S.k.ov = await api("knowledge"); if (up) await kOpen(up).catch(() => kReload()); else await kReload(); }) }, "Take out what was added by hand") : null));
+    const row = (x, right) => h("button", { class: "lrowb", type: "button", onclick: kShow(x.id) }, dot(x.type, x.level), h("span", null, x.name), h("em", null, right || words(x.type)));
+    const open = n && n.drilled ? (sc.kids[n.id] || []).length : 0;
+    return h("section", { class: "gx-panel gx-right-panel" }, h("div", { class: "gx-panel-head" }, h("h2", null, "Entity"), h("button", { class: "gx-icon-btn plain", type: "button", "aria-label": "Close the inspector", title: "Close the inspector", onclick: () => { S.k.e = null; kHash(null); render(); } }, ico("close", 14))),
+      h("div", { class: "gx-panel-body" },
+        n ? h("div", { class: "gx-drill" }, h("p", null, h("strong", null, words(e.entity.type).replace(/^./, (c) => c.toUpperCase())), " in the level map" + (upName ? ", under " + upName : "") + ". " + (n.below ? "Below it: " + n.below + "." : "Nothing below it.")),
+          h("div", { class: "btn-row" }, h("button", { class: "btn sm primary", type: "button", disabled: !n.below || n.drilled, title: "Open what is under it (or double-click the node)", onclick: kDrill(n, true) }, ico("down"), " Drill down"),
+            up ? h("button", { class: "btn sm", type: "button", title: "Up to " + upName, onclick: upBox ? () => { S.k.grp = up.slice(6); S.k.e = null; kHash(null); render(); } : kSelect(up) }, ico("up"), " Up to " + (upBox ? upName : upName.length > 24 ? upName.slice(0, 23) + "…" : upName)) : null,
+            n.drilled ? h("button", { class: "btn sm ghost", type: "button", title: "Take what is open under it off the scene", onclick: kDrill(n, false) }, "Collapse −" + open) : null, h("button", { class: "btn sm ghost", type: "button", title: "Back to the levels and the entities that head them", onclick: kTop() }, ico("home"), " Top"))) : null,
+        h("div", { class: "gx-details" },
+          h("div", null, h("div", { class: "gx-title-row" }, h("i", { class: "kdot", style: "width:11px;height:11px;background:" + (LCOL[e.level] || "#7a8496") }), h("span", { class: "gx-title" }, e.entity.name)),
+            h("div", { class: "gx-badges" }, h("span", { class: "badge", title: e.class.definition || "" }, words(e.entity.type).replace(/^./, (c) => c.toUpperCase())), h("span", { class: "badge info" }, (ov.origin_words[e.origin] || e.origin).replace(/^./, (c) => c.toUpperCase())),
+              levelBadge(e.level, levelName[e.level] || "Added knowledge"), (e.also_at || []).map((x) => levelBadge(x, levelName[x] || x)), p.status ? pill(p.status) : null)),
+          h("div", null, p.description ? h("p", { class: "small" }, p.description) : null,
+            cite ? h("p", { class: "small", style: "margin-top:6px" }, h("b", null, "Cited as: "), cite) : null, p.jurisdiction ? h("p", { class: "small muted" }, p.jurisdiction) : null,
+            p.rationale ? h("p", { class: "small", style: "margin-top:6px" }, h("b", null, "Why: "), p.rationale) : null,
+            e.origin === "curated" ? h("p", { class: "knote" }, "A short summary written for this knowledge base, not the text of the source. Read the current text before relying on it.") : null,
+            e.entity.synonyms.length ? h("p", { class: "tiny faint", style: "margin-top:6px" }, "Also known as: " + e.entity.synonyms.join(", ")) : null,
+            h("p", { class: "tiny faint", style: "margin-top:4px" }, "The way to it: " + [levelName[e.trail[0].level] || "Added", ...e.trail.map((x) => kShort(x.name))].join(" › "))),
+          lists.length || Object.keys(p).some((k) => !KSKIP.includes(k) && p[k] !== null && typeof p[k] !== "object") ? h("div", null, h("h3", { class: "gx-sub" }, "Attributes"), lists.map(([k, v]) => [h("div", { class: "tiny faint", style: "margin-top:4px" }, words(k)), steps(v)]),
+            kv(Object.entries(p).filter(([k, v]) => !KSKIP.includes(k) && v !== null && (typeof v !== "object" || (Array.isArray(v) && v.length < 2))).map(([k, v]) => [words(k), Array.isArray(v) ? v.join("; ") : String(v)]))) : null,
+          e.basis.length ? h("div", null, h("h3", { class: "gx-sub" }, e.rule ? "What its rule rests on" : "What this rule rests on"), e.rule ? row(e.rule, "policy rule") : null,
+            e.basis.map((b) => h("button", { class: "kbasis", type: "button", style: "border-left-color:" + (LCOL[b.level] || "#7a8496"), onclick: kShow(b.id) }, h("b", null, b.name), h("span", { class: "muted" }, " · " + (b.of ? b.of.name : words(b.type)) + (b.industries.length ? " · " + b.industries.join(", ") : "")), h("div", null, b.says)))) : null,
+          u.rules.length || u.findings ? h("div", null, h("h3", { class: "gx-sub" }, "Where it is used"),
+            u.rules.length ? [h("div", { class: "tiny faint", style: "margin-bottom:4px" }, u.rules.length + (u.rules.length === 1 ? " rule rests" : " rules rest") + " on it"), (S.k.more === "rules" ? u.rules : u.rules.slice(0, 5)).map((r) => row(r)),
+              u.rules.length > 5 ? h("button", { class: "btn sm ghost", onclick: () => { S.k.more = S.k.more === "rules" ? null : "rules"; render(); } }, S.k.more === "rules" ? "Show fewer" : "Show all " + u.rules.length) : null] : null,
+            u.findings ? [h("div", { class: "row", style: "margin:8px 0 4px;gap:6px" }, h("span", { class: "tiny faint" }, u.findings + (u.findings === 1 ? " finding" : " findings") + " on " + u.cases.length + (u.cases.length === 1 ? " case" : " cases")), statusPills(u.by_status)),
+              u.cases.slice(0, 6).map((c) => h("div", { class: "kcase" }, h("button", { class: "btn sm ghost mono", type: "button", title: "Open the case", onclick: run(() => open(c.name, "provenance")) }, c.name),
+                c.findings.slice(0, 8).map((f) => h("button", { class: "pill " + f.status, type: "button", title: f.name + ": go to this finding in the graph", onclick: kShow(f.id) }, f.status)), c.findings.length > 8 ? h("span", { class: "tiny faint" }, "+" + (c.findings.length - 8)) : null)),
+              u.cases.length > 6 ? h("p", { class: "tiny faint" }, "and " + (u.cases.length - 6) + " more case(s)") : null] : null) : null,
+          h("div", null, h("h3", { class: "gx-sub" }, "Relations ", h("span", { class: "faint" }, "(" + e.links.length + ")")),
+            h("ul", { class: "gx-rel-list" }, Object.entries(groups).sort((a, b) => a[0].split(":")[1].localeCompare(b[0].split(":")[1])).map(([k, ls]) => { const [dir, pred] = k.split(":"), all = S.k.more === k;
+              return [(all ? ls : ls.slice(0, 4)).map((l) => h("li", { class: "gx-rel" }, h("div", { class: "gx-rel-head" }, h("span", { class: "gx-rel-name", title: (REL[pred] || {}).definition || "" }, linkLabel(dir, pred)), h("button", { class: "linkish", type: "button", onclick: kShow(l.other) }, l.other_name)),
+                  h("div", { class: "gx-rel-src" }, words(l.other_type) + " · " + (LVL[l.other_level] || "added").toLowerCase() + " level · " + (ov.origin_words[l.origin] || l.origin)))),
+                ls.length > 4 ? h("li", { class: "gx-rel" }, h("button", { class: "btn sm ghost", onclick: () => { S.k.more = all ? null : k; render(); } }, all ? "Show fewer" : "Show all " + ls.length + " " + linkLabel(dir, pred).slice(2))) : null]; }))),
+          h("div", null, h("h3", { class: "gx-sub" }, "Where it comes from"), e.support.length ? e.support.slice(0, 4).map((c) => h("div", { class: "src", style: "margin-bottom:4px;cursor:default" }, h("div", { class: "row" }, h("b", null, c.fileName || c.source || c.system || c.app || c.kind), h("span", { class: "muted" }, [c.locator, c.case].filter(Boolean).join(" · ")),
+              c.check ? h("span", { class: "right" }, pill({ named: "pass", quoted: "pass", read: "pass", paraphrased: "review", missing: "fail" }[c.check] || "", c.check)) : null), c.quote ? h("q", null, c.quote) : h("span", { class: "muted" }, c.text || ""))) : h("p", { class: "small muted" }, "No source recorded."),
+            e.support.length > 4 ? h("p", { class: "tiny faint" }, "and " + (e.support.length - 4) + " more") : null),
+          h("div", { class: "btn-row" }, h("button", { class: "btn sm", onclick: () => copyLink(e.entity.id) }, ico("link"), " Copy the link to this node"),
+            e.attach.length ? h("button", { class: "btn sm", onclick: run(() => addUnder(e)) }, ico("plus"), " Add under this") : null,
+            e.by_hand ? h("button", { class: "btn sm", onclick: run(async () => { await api("knowledge/facts/" + encodeURIComponent(e.by_hand) + "/remove", {}); toast("Taken out: " + e.entity.name); const back = e.trail.length > 1 ? e.trail[e.trail.length - 2].id : null; S.k.ov = await api("knowledge"); if (back) await kOpen(back).catch(() => kReload()); else await kReload(); }) }, "Take out what was added by hand") : null))));
+  }
+  function kLevelPanel(sc) {
+    const l = sc.m.levels.find((x) => x.id === S.k.grp), heads = (sc.kids["level:" + l.id] || []).map((id) => sc.by[id]), isOpen = sc.m.open.includes(l.id);
+    return h("section", { class: "gx-panel gx-right-panel" }, h("div", { class: "gx-panel-head" }, h("h2", null, "Level"), h("button", { class: "gx-icon-btn plain", type: "button", "aria-label": "Close the inspector", title: "Close the inspector", onclick: () => { S.k.grp = null; render(); } }, ico("close", 14))),
+      h("div", { class: "gx-panel-body" }, h("div", { class: "gx-details" },
+        h("div", null, h("div", { class: "gx-title-row" }, h("span", { class: "gx-level-swatch big", style: "background:" + LCOL[l.id] }), h("strong", null, l.name), h("span", { class: "tiny faint" }, "a level of the knowledge")),
+          h("p", { class: "small muted", style: "margin:6px 0 2px" }, l.say), h("p", { class: "tiny faint" }, l.entities ? l.entities.toLocaleString() + (l.entities === 1 ? " entity" : " entities") + " at this level; the " + l.heads + " that head it open here, the rest by drilling down from them." : "Nothing at this level yet." + (l.id === "customer" ? " It fills as cases are assessed." : ""))),
+        l.entities ? h("div", { class: "gx-drill" }, h("p", null, heads.length + " of " + l.heads + " on the scene."),
+          h("div", { class: "btn-row" }, h("button", { class: "btn sm primary", type: "button", disabled: isOpen, onclick: kLevel(l.id, true) }, ico("layers"), " Open"), h("button", { class: "btn sm ghost", type: "button", disabled: !isOpen, onclick: kLevel(l.id, false) }, "Collapse"), h("button", { class: "btn sm ghost", type: "button", onclick: kTop() }, ico("home"), " Top"))) : null,
+        heads.length ? h("div", null, h("h3", { class: "gx-sub" }, "Entities ", h("span", { class: "faint" }, "(" + heads.length + ")")), heads.map((x) => h("button", { class: "lrowb", type: "button", onclick: kSelect(x.id) }, dot(x.type, x.level), h("span", null, x.name), h("em", null, words(x.type))))) : null,
+        l.classes && l.classes.length ? h("div", null, h("h3", { class: "gx-sub" }, "What is at this level"), h("div", { class: "chips" }, l.classes.map(([c, k]) => h("span", { class: "chip", style: "cursor:default" }, k + " " + words(c))))) : null)));
+  }
+  function kLeft(sc, drawn) {   // Scene & filters, as KB Forge's: the levels, what is on the scene, and what is shown of it
+    const m = sc.m, hide = S.k.hideT || [], hideR = S.k.hideR || [], kinds = {}, rels = {};
+    m.nodes.forEach((n) => (kinds[n.type] = (kinds[n.type] || 0) + 1)); m.links.forEach((l) => (rels[l.p] = (rels[l.p] || 0) + 1));
+    const total = S.k.ov.index.entities, flip = (list, key, v) => () => { S.k[key] = list.includes(v) ? list.filter((x) => x !== v) : [...list, v]; render(); };
+    const check = (key, label, on) => h("label", { class: "gx-check" }, h("input", { type: "checkbox", checked: on, onchange: () => { S.k[key] = !on; render(); } }), label);
+    if (!kLeftOpen()) return h("button", { class: "gx-icon-btn gx-filters-btn", type: "button", title: "Scene & filters", "aria-label": "Open scene and filters", onclick: () => { S.k.left = true; render(); } }, ico("filter", 15));
+    return h("section", { class: "gx-panel gx-left-panel" }, h("div", { class: "gx-panel-head" }, h("h2", null, "Scene & filters"), h("button", { class: "gx-icon-btn plain", type: "button", "aria-label": "Close the panel", title: "Close the panel", onclick: () => { S.k.left = false; render(); } }, ico("close", 14))),
+      h("div", { class: "gx-panel-body" },
+        h("div", null, m.levels.map((l) => h("button", { class: "gx-filter-btn", type: "button", title: l.say, onclick: () => { S.k.grp = l.id; S.k.e = null; kHash(null); render(); } }, h("i", { class: "kdot", style: "background:" + LCOL[l.id] }), h("span", { class: "grow" }, l.name), h("span", { class: "num" }, l.entities.toLocaleString()))),
+          h("p", { class: "tiny faint", style: "margin:4px 6px 0" }, "a ring: known at a second level too")),
+        h("p", { class: "small", style: "margin:0" }, h("b", null, sc.nodes.length), " of " + total.toLocaleString() + " entities on the scene · " + m.links.length + " links (" + drawn + " drawn)"),
+        h("div", null, h("h3", { class: "gx-sub" }, "Classes"), h("ul", { class: "gx-list" }, Object.keys(kinds).sort((a, b) => kinds[b] - kinds[a] || a.localeCompare(b)).map((t) => h("li", { class: "gx-filter-row" },
+          h("button", { class: "gx-filter-btn" + (hide.includes(t) ? " off" : ""), type: "button", "aria-pressed": String(!hide.includes(t)), title: hide.includes(t) ? "Show this kind" : "Hide this kind", onclick: flip(hide, "hideT", t) }, h("i", { class: "kdot", style: "background:#8a94a6" }), h("span", { class: "grow" }, words(t).replace(/^./, (c) => c.toUpperCase())), h("span", { class: "num" }, kinds[t]), h("span", { class: "gx-eye" }, ico(hide.includes(t) ? "eyeoff" : "eye", 13))),
+          h("button", { class: "gx-only", type: "button", title: "Show only this kind", onclick: () => { S.k.hideT = Object.keys(kinds).filter((x) => x !== t); render(); } }, "only")))),
+          hide.length ? h("button", { class: "btn sm ghost", type: "button", style: "margin-top:4px", onclick: () => { S.k.hideT = []; render(); } }, "Show every kind") : null),
+        Object.keys(rels).length ? h("div", null, h("h3", { class: "gx-sub" }, "Relations"), h("ul", { class: "gx-list" }, Object.keys(rels).sort((a, b) => rels[b] - rels[a] || a.localeCompare(b)).slice(0, S.k.more === "rels" ? 99 : 8).map((r) => h("li", { class: "gx-filter-row" },
+          h("button", { class: "gx-filter-btn" + (hideR.includes(r) ? " off" : ""), type: "button", "aria-pressed": String(!hideR.includes(r)), title: "With every link drawn: " + (hideR.includes(r) ? "show" : "hide") + " this kind of link", onclick: flip(hideR, "hideR", r) }, h("span", { class: "grow" }, words(r)), h("span", { class: "num" }, rels[r]), h("span", { class: "gx-eye" }, ico(hideR.includes(r) ? "eyeoff" : "eye", 13)))))),
+          Object.keys(rels).length > 8 ? h("button", { class: "btn sm ghost", type: "button", style: "margin-top:4px", onclick: () => { S.k.more = S.k.more === "rels" ? null : "rels"; render(); } }, S.k.more === "rels" ? "Show fewer" : "All " + Object.keys(rels).length + " kinds of link") : null) : null,
+        h("div", null, check("labels", "Relation labels", S.k.labels !== false), check("every", "Every link (not only the tree's)", !!S.k.every)),
+        h("p", { class: "tiny faint", style: "margin:0;border-top:1px solid var(--line);padding-top:10px" }, h("b", null, "+N"), " on a node = what is still to open below it. ", h("b", null, "Click"), " a node to see what it is, ", h("b", null, "double-click"), " to drill down or close it. Drag the canvas to move it, scroll to zoom.")));
+  }
+  function explorer() {
+    const ov = S.k.ov, sc = kScene(), lay = kLayout(sc), a = kArea(), canvas = kCanvas(sc, lay), e = S.k.e, m = sc.m, free = (a.left + a.w - a.right) / 2, wide = "max-width:" + Math.max(260, a.w - a.left - a.right - 16) + "px;left:" + free + "px";
+    const seg = (id, label) => h("button", { type: "button", class: (S.k.layout || "layered") === id ? "on" : "", "aria-pressed": String((S.k.layout || "layered") === id), onclick: () => { S.k.layout = id; S.k.tf = null; S.k.focus = e ? e.entity.id : null; render(); } }, label);
+    const search = run(async () => { S.k.hits = S.k.q.trim() ? await api("knowledge/search?q=" + encodeURIComponent(S.k.q)) : null; render(); });
+    const up = e && sc.by[e.entity.id] ? sc.parentOf[e.entity.id] : null;
+    const crumbs = e ? [h("button", { class: "gx-trail-btn", type: "button", onclick: () => { S.k.grp = e.trail[0].level; S.k.e = null; kHash(null); render(); } }, h("span", { class: "gx-level-swatch", style: "background:" + (LCOL[e.trail[0].level] || "#7a8496") }), LVL[e.trail[0].level] || "Added"),
+      e.trail.map((x, i) => [h("span", { class: "gx-crumb-sep" }, ico("chev", 11)), h("button", { class: "gx-trail-btn" + (i === e.trail.length - 1 ? " on" : ""), type: "button", "aria-current": i === e.trail.length - 1 ? "location" : null, title: words(x.type) + ": " + x.name, onclick: i === e.trail.length - 1 ? null : kShow(x.id) }, kShort(x.name).length > 30 ? kShort(x.name).slice(0, 29) + "…" : kShort(x.name))])]
+      : S.k.grp ? [h("button", { class: "gx-trail-btn on", type: "button", "aria-current": "location" }, h("span", { class: "gx-level-swatch", style: "background:" + LCOL[S.k.grp] }), LVL[S.k.grp])] : [h("span", { class: "gx-trail-hint" }, "double-click a level to open it, an entity to drill down")];
+    return h("div", { class: "gx-root", style: "height:" + (a.h + 54) + "px" },
+      h("div", { class: "gx-header" }, h("div", { class: "gx-brand" }, h("span", { class: "gx-brand-icon" }, ico("compass", 18)), h("div", { class: "gx-brand-text" }, h("div", { class: "gx-brand-title" }, "Explore"), h("div", { class: "tiny faint truncate" }, (ov.name || "Workspace knowledge") + " · " + ov.index.entities.toLocaleString() + " entities"))),
+        h("form", { class: "gx-header-search gx-search", role: "search", onsubmit: search }, h("span", { class: "gx-search-icon" }, ico("search", 15)), h("input", { class: "input", type: "text", placeholder: "Search a standard, an article, a rule, a company, a reference number…", "aria-label": "Search the knowledge graph", value: S.k.q, oninput: (ev) => (S.k.q = ev.target.value) }),
+          S.k.hits ? (S.k.hits.length ? h("ul", { class: "gx-search-list" }, h("li", { class: "gx-search-group" }, "Entities · click one to go to it"), S.k.hits.map((x) => h("li", { class: "gx-search-item", onclick: kShow(x.id) }, h("i", { class: "kdot", style: "background:" + (LCOL[x.level] || "#7a8496") }), h("span", { class: "grow truncate" }, h("b", null, x.name), x.description ? h("span", { class: "faint" }, " · " + x.description) : null), h("span", { class: "tiny faint" }, words(x.type) + " · " + (LVL[x.level] || "added").toLowerCase()))))
+            : h("div", { class: "gx-search-empty" }, "Nothing in the graph matches that.")) : null),
+        h("div", { class: "seg gx-seg", role: "group", "aria-label": "Layout" }, seg("force", "Force"), seg("layered", "Layered"), seg("radial", "Radial")),
+        h("span", { class: "gx-view-tag" }, ico("layers", 14), " Level map"),
+        h("div", { class: "gx-header-tools" }, h("button", { class: "btn sm", type: "button", title: "Fit the whole scene on the canvas", onclick: () => { S.k.focus = null; S.k.tf = kFit(lay, sc); S.k.auto = true; kApplyTf(); } }, ico("fit"), " Show all"),
+          h("button", { class: "gx-icon-btn", type: "button", title: "Back to the levels and the entities that head them", "aria-label": "Back to the top", onclick: kTop() }, ico("reset", 15)))),
+      h("div", { class: "gx-canvas" }, canvas.svg,
+        h("nav", { class: "gx-levelbar", "aria-label": "Levels of the map", style: wide }, ico("layers"), h("strong", null, "Level map"),
+          m.levels.map((l) => { const open = (sc.kids["level:" + l.id] || []).length; return h("span", { class: "gx-level" }, h("span", { class: "gx-level-sep" }, "·"), h("button", { type: "button", class: m.open.includes(l.id) ? "on" : "", disabled: !l.entities, "aria-pressed": String(m.open.includes(l.id)), title: l.say + (l.entities ? " Click to " + (m.open.includes(l.id) ? "close." : "open.") : ""), onclick: kLevel(l.id) }, h("span", { class: "gx-level-swatch", style: "background:" + LCOL[l.id] }), l.name + " ", h("span", { class: "num" }, open + "/" + l.heads))); })),
+        h("nav", { class: "gx-trail", "aria-label": "Where you are in the tree", style: wide }, h("button", { class: "gx-trail-btn", type: "button", disabled: !e, title: "Up to what it hangs from", onclick: !e ? null : up && !up.startsWith("level:") ? kSelect(up) : () => { S.k.grp = e.trail[0].level; S.k.e = null; kHash(null); render(); } }, ico("up", 12), " Up"), h("span", { class: "gx-trail-sep" }),
+          h("button", { class: "gx-trail-btn", type: "button", title: "To the top: the levels of the map, and the entities that head them", onclick: kTop() }, ico("home", 12), " Top"), h("span", { class: "gx-crumb-sep" }, ico("chev", 11)), h("span", { class: "gx-trail-crumbs" }, crumbs)),
+        kLeft(sc, canvas.drawn), e ? kInspector(sc) : S.k.grp ? kLevelPanel(sc) : null,
+        h("p", { class: "gx-hint", style: "left:" + free + "px;max-width:" + Math.max(200, a.w - a.left - a.right - 130) + "px" }, "Level map · the levels top-down, each with the entities that head it · double-click an entity to drill down · Up goes back up, Top to the levels"),
+        h("div", { class: "gx-zoom", style: "right:" + (a.right + 2) + "px" }, h("button", { class: "gx-zoom-btn", type: "button", title: "Zoom in", "aria-label": "Zoom in", onclick: () => kZoom(1.25) }, ico("plus", 15)), h("button", { class: "gx-zoom-btn", type: "button", title: "Zoom out", "aria-label": "Zoom out", onclick: () => kZoom(0.8) }, ico("minus", 15)),
+          h("button", { class: "gx-zoom-btn", type: "button", title: "Fit the scene", "aria-label": "Fit the scene", onclick: () => { S.k.focus = null; S.k.tf = kFit(lay, sc); S.k.auto = true; kApplyTf(); } }, ico("fit", 15)))));
   }
   const STATES = { standards: ["standard or regulation", "standards and regulations"], provisions: ["provision", "provisions"], bodies: ["standards body", "standards bodies"], practices: ["practice", "practices"], processes: ["process", "processes"], risks: ["risk", "risks"],
     kpis: ["measure", "measures"], terms: ["term", "terms"], challenges: ["challenge", "challenges"], capabilities: ["capability", "capabilities"] };
@@ -382,43 +656,15 @@
         h("table", { style: "margin-top:14px" }, h("thead", null, h("tr", null, ["Kind of link", "From", "To", "In the graph", "Meaning"].map((x) => h("th", null, x)))), h("tbody", null, ov.relationships.filter((r) => r.count).map((r) => h("tr", null, h("td", null, h("b", null, r.name)), h("td", { class: "small" }, r.domain), h("td", { class: "small" }, r.range), h("td", { class: "mono small" }, r.count), h("td", { class: "small muted" }, r.definition))))))];
   }
   function knowledge() {
-    const ov = S.k.ov, e = S.k.e, idx = ov.index, ver = ov.verification || {}, st = ver.stats || {}, W = 1100, H = 600, map = S.k.view === "map", manage = S.k.view === "manage", g = S.k.g;
-    const checked = (st.checked_entities || 0) + (st.checked_relationships || 0), found = checked - (st.missing || 0) - (st.unchecked || 0), levelName = Object.fromEntries(ov.levels.map((l) => [l.id, l.name]));
-    const curated = ov.knowledge_bases.filter((b) => b.kind === "curated" && b.on), goTo = map ? kShow : kEntity;
-    let svg = null;
-    if (map) svg = levelMap();
-    else if (!manage) {
-      const key = g.nodes.length + ":" + g.links.length + ":" + (g.focus || "") + ":" + S.k.levels.join("");
-      if (key !== kKey) { kPos = spread(g.nodes, g.links, W, H); kKey = key; }
-      const sel = e ? e.entity.id : g.focus, near = new Set(g.links.filter((l) => l.s === sel || l.o === sel).flatMap((l) => [l.s, l.o]));
-      svg = h("svg", { class: "graph", viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": "Knowledge graph" },
-        g.links.map((l) => h("line", { x1: kPos[l.s].x, y1: kPos[l.s].y, x2: kPos[l.o].x, y2: kPos[l.o].y, class: l.s === sel || l.o === sel ? "hot" : "" }, h("title", null, words(l.p)))),
-        g.nodes.map((n) => h("g", { class: "nd" + (n.id === sel ? " sel" : ""), transform: "translate(" + kPos[n.id].x + "," + kPos[n.id].y + ")", onclick: kEntity(n.id) },
-          h("circle", { r: n.type === "UseCase" ? 10 : Math.min(9, 4.5 + Math.sqrt(n.degree)), fill: KCOL[n.type] || LCOL[n.level] || "#7a8496", stroke: "#fff", "stroke-width": 1.5, opacity: sel && !near.has(n.id) && n.id !== sel ? 0.45 : 1 }),
-          g.nodes.length < 70 || n.type === "UseCase" || n.degree > 9 || n.id === sel || near.has(n.id) ? h("text", { x: 11, y: 4 }, n.name.length > 30 ? n.name.slice(0, 29) + "…" : n.name) : null, h("title", null, n.type + ": " + n.name))));
-    }
-    const kinds = {}; (map ? S.k.m.nodes : manage ? [] : g.nodes).forEach((n) => (kinds[n.type] = (kinds[n.type] || 0) + 1));
-    const hide = S.k.hide || [], legend = Object.keys(kinds).sort().map((t) => (map
-      ? h("button", { class: "lg" + (hide.includes(t) ? " off" : ""), type: "button", "aria-pressed": String(!hide.includes(t)), title: hide.includes(t) ? "Show this kind on the map" : "Hide this kind on the map", onclick: () => { S.k.hide = hide.includes(t) ? hide.filter((x) => x !== t) : [...hide, t]; render(); } }, dot(t), words(t), h("span", { class: "muted" }, kinds[t]))
-      : h("span", { class: "lg" }, dot(t), words(t))));
-    const panel = e ? kPanel() : cardOf("How to read it", h("p", { class: "small" }, "Four levels, top to bottom, as KB Forge lays knowledge out: what each industry works under, what the domain and each use case ask for, the accelerator's agents, and the workspace with its cases."),
-      h("p", { class: "small muted", style: "margin-top:6px" }, "Click a dot to open what is below it and to see what it is, what rests on it and where it came from. Every node has a link of its own: open that link and the map opens along the way down to the node."),
-      curated.length ? [h("h3", { class: "kh" }, "Start from a knowledge base"), curated.map((b) => h("button", { class: "lrowb", type: "button", onclick: kShow(b.head_id) }, h("i", { class: "kdot", style: "background:" + LCOL[b.level] }), h("span", null, b.head), h("em", null, b.entities + " things")))] : null,
-      ov.known.length ? [h("h3", { class: "kh" }, "Met most often"), ov.known.map((x) => h("button", { class: "lrowb", type: "button", onclick: goTo(x.id) }, dot(x.type), h("span", null, x.name), h("em", null, x.cases + " case(s)")))] : null);
-    const seg = (id, label) => h("button", { "aria-pressed": String(S.k.view === id), onclick: run(async () => { S.k.view = id; if (id === "network" && !S.k.g) S.k.g = await api("knowledge/graph?levels=" + S.k.levels.join(",")); render(); }) }, label);
-    return [section("Knowledge", "Everything this workspace knows, as one graph in KB Forge's format: four levels, from the industry down to each case. Every finding can be followed to the rule it applied and from the rule to the article, control or term it rests on. Each node has a link of its own and says where it came from."),
-      h("div", { class: "grid g4", style: "margin-bottom:14px" }, [[idx.entities.toLocaleString(), "things known"], [idx.triples.toLocaleString(), "links between them"], [ov.quality.score, "quality score, out of 100"], [checked ? Math.round((100 * found) / checked) + "%" : "–", "of " + checked + " citations found in the text"]].map(([v, l]) => h("div", { class: "tile" }, h("b", null, v), h("span", null, l)))),
-      h("div", { class: "row", style: "margin-bottom:10px" }, S.k.back ? h("button", { class: "btn sm", onclick: run(() => open(S.k.back)) }, "← Back to case " + S.k.back) : null,
-        h("div", { class: "seg" }, seg("map", "Level map"), seg("network", "Network"), seg("manage", "Manage")),
-        map ? [h("button", { class: "btn sm", onclick: () => { S.k.touched = true; S.k.open = ov.levels.map((l) => l.id); S.k.drill = []; S.k.e = null; S.k.hide = []; kHash(null); kMap()(); } }, "Back to the four levels"), S.k.drill.length ? h("span", { class: "small muted" }, S.k.drill.length + " opened") : null]
-          : manage ? null : [h("div", { class: "seg" }, ov.levels.map((lv) => h("button", { "aria-pressed": String(S.k.levels.includes(lv.id) && !g.focus), onclick: () => { S.k.levels = S.k.levels.includes(lv.id) ? S.k.levels.filter((x) => x !== lv.id) : [...S.k.levels, lv.id]; if (!S.k.levels.length) S.k.levels = [lv.id]; kGraph("levels=" + S.k.levels.join(","))(); } }, lv.name))),
-            g.focus ? h("button", { class: "btn sm", onclick: kGraph("levels=" + S.k.levels.join(",")) }, "Back to the whole graph") : null],
-        manage ? null : h("form", { class: "row", style: "flex:1;min-width:260px;flex-wrap:nowrap", onsubmit: run(async () => { S.k.hits = S.k.q.trim() ? await api("knowledge/search?q=" + encodeURIComponent(S.k.q)) : null; render(); }) }, h("input", { type: "text", placeholder: "Search a standard, an article, a rule, a company, a reference number…", "aria-label": "Search the knowledge graph", value: S.k.q, oninput: (ev) => (S.k.q = ev.target.value) }), h("button", { class: "btn sm", type: "submit", style: "flex:none" }, "Search")),
-        !map && !manage ? h("span", { class: "small muted" }, g.shown + (g.shown < g.total ? " of " + g.total.toLocaleString() + " (the best connected)" : "") + " shown · " + g.links.length + " links") : null),
-      manage ? kManage() : [
-        S.k.hits ? cardOf(S.k.hits.length ? "Found: click one to go to it" : "Nothing found", S.k.hits.map((x) => h("button", { class: "lrowb", type: "button", onclick: goTo(x.id) }, dot(x.type, x.level), h("span", null, h("b", null, x.name), x.description ? h("span", { class: "muted" }, " · " + x.description) : null), h("em", null, words(x.type) + " · " + (LVL[x.level] || "added").toLowerCase() + (x.cases ? " · " + x.cases + " case(s)" : "")))),
-          h("button", { class: "btn sm ghost", style: "margin-top:4px", onclick: () => { S.k.hits = null; render(); } }, "Close")) : null,
-        h("div", { class: "split ksplit", style: "margin-top:10px" }, h("div", null, svg, h("div", { class: "legend" }, map ? h("span", { class: "small muted" }, "Kinds on the map (click to hide):") : null, legend)), panel)]];
+    const ov = S.k.ov, idx = ov.index, ver = ov.verification || {}, st = ver.stats || {}, manage = S.k.view === "manage";
+    const checked = (st.checked_entities || 0) + (st.checked_relationships || 0), found = checked - (st.missing || 0) - (st.unchecked || 0);
+    const seg = (id, label) => h("button", { type: "button", "aria-pressed": String(manage === (id === "manage")), onclick: () => { S.k.view = id; S.k.tf = null; render(); } }, label);
+    return [h("div", { class: "kx-head" }, h("h1", null, "Knowledge"), h("div", { class: "seg" }, seg("explore", "Explore the graph"), seg("manage", "Manage")),
+        S.k.back ? h("button", { class: "btn sm", onclick: run(() => open(S.k.back)) }, "← Back to case " + S.k.back) : null,
+        h("span", { class: "small muted right" }, idx.entities.toLocaleString() + " things known · " + idx.triples.toLocaleString() + " links · quality " + ov.quality.score + " of 100 · kept in KB Forge's format")),
+      manage ? [h("p", { class: "lead" }, "Everything the graph is built from, and what it holds. The graph is drawn under Explore the graph, as KB Forge draws one: four levels, from the industry down to each case."),
+        h("div", { class: "grid g4", style: "margin:12px 0 14px" }, [[idx.entities.toLocaleString(), "things known"], [idx.triples.toLocaleString(), "links between them"], [ov.quality.score, "quality score, out of 100"], [checked ? Math.round((100 * found) / checked) + "%" : "–", "of " + checked + " citations found in the text"]].map(([v, l]) => h("div", { class: "tile" }, h("b", null, v), h("span", null, l)))),
+        kManage()] : explorer()];
   }
 
   // ---------------------------------------------------------------------------------------------- how it is governed

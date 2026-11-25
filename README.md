@@ -49,8 +49,8 @@ python -m docuinsights serve --port 8090
 ```
 
 Open the workbench and pick a use case on the home page: **Try it** on a sample runs it end to end. The top of the page
-has five screens: Home, Cases, Knowledge (everything known, as a map of four levels: industry, domain, solution,
-customer), Agents (their contracts) and How it is governed (contracts, memory, provenance, throttling as they stand).
+has five screens: Home, Cases, Knowledge (everything known, explored as in KB Forge: four levels, industry, domain,
+solution, customer), Agents (their contracts) and How it is governed (contracts, memory, provenance, throttling as they stand).
 Inside a case: summary, documents, evidence, consistency, rules, the graph, provenance, the what-if simulator, the
 decision, and **Agent orchestration**: one board that shows the boss agent's plan, each agent run under its contract,
 and what every step took from the knowledge graph and the shared memory. It follows a running assessment and plays a
@@ -64,9 +64,13 @@ operations, insurance, banking and lending, customs and trade, trade finance) wi
 processes, risks, controls, measures and terms, and the domain itself. Every rule of every use case is linked to the
 article, control or term it rests on, and every assessed case adds to the graph.
 
-* **Follow a finding to its reason.** A finding card names what its rule rests on; a click opens that exact node on
-  the level map, with the way down to it, what it says, how it is cited and every case it was used on. Each node has
-  a link of its own (`#/knowledge/<id>`) to send to someone.
+* **Explore it as in KB Forge.** *Knowledge > Explore the graph* draws the graph the way KB Forge's Explore screen
+  draws its level map: the levels as boxes on a spine, entities as circles in their level's colour with +N for what
+  is still to open, a double-click to drill down into a tidy tree, Force / Layered / Radial layouts, the level bar,
+  the trail, Scene & filters on the left and the inspector on the right.
+* **Follow a finding to its reason.** A finding card names what its rule rests on; a click opens that exact node in
+  the explorer, with the way down to it drawn, what it says, how it is cited and every case it was used on. Each node
+  has a link of its own (`#/knowledge/<id>`) to send to someone.
 * **Manage it.** *Knowledge > Manage* switches a curated knowledge base off and on, moves an added one to another
   level, and lists what was added by hand. To add a fact, open the node it belongs under and choose *Add under this*.
 * **Add your own.** Put YAML files like the shipped ones in a folder and name it in `DOCUINSIGHTS_KNOWLEDGE_DIR`.
