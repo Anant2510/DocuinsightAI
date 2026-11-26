@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .throttle import Throttled, why
 from . import values as V
 from .casefile import current, doc_type, live_docs
 from .profiles import Profile
@@ -55,12 +56,13 @@ def classify(case: dict[str, Any], profile: Profile, model: Any, overlay: dict[s
         body = "\n\n".join(f"<document id=\"{d['id']}\" name=\"{d['name']}\">\n{current(d).get('text', '')[:1800]}\n</document>" for d in todo)
         prompt = (f"DOCUMENT TYPES\n{types}\n- other: none of the above\n\nDOCUMENTS (the first part of each)\n{body}\n\n"
                   'Return {"documents": [{"id": "<document id>", "type": "<type id>", "confidence": <0..1>, "rationale": "<the words on the page that decide it>"}]}')
+        getattr(model, "about", lambda docs: None)([d["id"] for d in todo])   # one request names the whole batch: its spend is shared between them
         try:
             for row in (model.json(CLASSIFY_SYSTEM, prompt, step="classify", tier="fast") or {}).get("documents") or []:
                 if isinstance(row, dict) and row.get("id"):
                     answers[str(row["id"])] = row
         except Exception as exc:
-            notes.append(f"the model could not classify ({type(exc).__name__}: {str(exc)[:120]}); the profile's signals were used instead")
+            notes.append((f"the model was {why(exc)}" if isinstance(exc, Throttled) else f"the model could not classify ({type(exc).__name__}: {str(exc)[:120]})") + "; the profile's signals were used instead")
     for d in todo:
         text = current(d).get("text", "")
         by_signals = classify_by_signals(text, profile, overlay)
@@ -155,6 +157,7 @@ def extract_with_model(doc: dict[str, Any], type_def: dict[str, Any], model: Any
     spec = "\n".join(f"- {f['id']} ({f.get('type', 'text')}): {f.get('name')}" for f in type_def.get("fields") or [])
     prompt = (f"DOCUMENT TYPE: {type_def.get('name')}\n\nFIELDS\n{spec}\n\n<document name=\"{doc['name']}\">\n{ver.get('text', '')[:14000]}\n</document>\n\n"
               'Return {"fields": {"<field id>": {"value": "<as printed>" | null, "quote": "<the line it is on, verbatim>", "confidence": <0..1>}}}')
+    getattr(model, "about", lambda docs: None)([doc["id"]])
     data = model.json(EXTRACT_SYSTEM, prompt, step="extract", tier="balanced") or {}
     out: dict[str, dict[str, Any]] = {}
     pages = ver.get("pages") or []
@@ -194,7 +197,7 @@ def extract(case: dict[str, Any], profile: Profile, model: Any) -> dict[str, Any
                             f["alternative"] = {"value": fields[fid]["value"], "method": "pattern"}
                         fields[fid] = f
                 except Exception as exc:
-                    notes.append(f"{d['name']}: the model could not extract ({type(exc).__name__}); the profile's labels were used instead")
+                    notes.append(f"{d['name']}: " + (f"the model was {why(exc)}" if isinstance(exc, Throttled) else f"the model could not extract ({type(exc).__name__})") + "; the profile's labels were used instead")
             fields.update(kept)
             d["fields"] = fields
             d["extracted"] = {"version": d["current"], "type": tid}

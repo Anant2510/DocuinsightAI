@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from . import assurance, contracts as C, extras, harness as H, kb as KB, model as M, net, ontology as O, pipeline as P, reader, reports, repository as Repo, throttle as T
+from . import assurance, contracts as C, extras, harness as H, kb as KB, model as M, net, ontology as O, pipeline as P, reader, reports, repository as Repo, spend as S, throttle as T
 from .ledger import Ledger, digest
 from .memory import SCOPES, Episodes
 from .casefile import current, doc_type, event, live_docs, new_case, now
@@ -69,6 +69,7 @@ class Service:
         self._kb: dict[str, KB.KnowledgeBase] = {}
         self._case_locks: dict[tuple[str, str], threading.RLock] = {}
         self._guard = threading.Lock()
+        self._stops: dict[tuple[str, str], dict[str, Any]] = {}   # a person's stop, asked while the case is being worked on: read before every model call and every stage
 
     @contextmanager
     def _hold(self, tenant: str, reference: str, wait: float | None = None) -> Any:
@@ -195,7 +196,110 @@ class Service:
                        progress=(lambda c: self.store.save(tenant, c)) if progress else None,
                        limiter=self.limiter, episodes=self.episodes(tenant), ledger=self.ledger(tenant) if record else None,
                        on_finish=(lambda c: (self.learn(tenant, c), self.notify(tenant, c, "case.assessed"))) if record else None,
-                       ground=(lambda agent, c, prof, classes: kb.grounding(prof.name, classes)) if kb.built() else None)
+                       ground=(lambda agent, c, prof, classes: kb.grounding(prof.name, classes)) if kb.built() else None,
+                       gate=lambda c, docs, size=0: self._may_call(tenant, c, docs, size), spend=lambda c, agent_id, calls, docs: S.record(c, agent_id, calls, docs, self.spend_settings(tenant).read()),
+                       stopped=lambda c: self._stopped(tenant, c), price=lambda call: S.cost_of(call, self.spend_settings(tenant).read()))
+
+    # ------------------------------------------------------------------ spend: what a case costs, and what stops it costing more
+    def spend_settings(self, tenant: str) -> S.Settings:
+        return S.Settings(self._home(tenant) / "spend.json")
+
+    def _apply_stop(self, tenant: str, case: dict[str, Any]) -> None:
+        """A person's "stop model use", asked while the case was being worked on, written on the case by whoever is working on it."""
+        st = self._stops.get((tenant, case["reference"]))
+        if st and st["mode"] == "model":
+            self._stops.pop((tenant, case["reference"]), None)
+            if not S.switch(case):
+                S.book(case)["model_off"] = {"by": st["by"], "at": st["at"], "note": st.get("note") or ""}
+                event(case, "model.stopped", f"Model use was stopped for this case by {st['by']}" + (f": {st['note']}" if st.get("note") else "")
+                      + ". The agents carry on with the use case's patterns and rules.", by=st["by"])
+                self.ledger(tenant).append("spend", st["by"], f"Model use stopped for case {case['reference']}", case=case["reference"], data={"spent": S.totals(case)})
+
+    def _may_call(self, tenant: str, case: dict[str, Any], docs: list[str], size: int = 0) -> None:
+        st = self._stops.get((tenant, case["reference"]))
+        if st and st["mode"] == "assessment":
+            raise T.Throttled(f"the assessment was stopped by {st['by']}")
+        self._apply_stop(tenant, case)
+        S.check(case, self.spend_settings(tenant).read(), docs, size, names={d["id"]: d.get("name") or d["id"] for d in case.get("documents") or []})
+
+    def _stopped(self, tenant: str, case: dict[str, Any]) -> str | None:
+        st = self._stops.get((tenant, case["reference"]))
+        return f"stopped by {st['by']}" + (f": {st['note']}" if st.get("note") else "") if st and st["mode"] == "assessment" else None
+
+    def stop(self, tenant: str, reference: str, mode: str = "model", *, by: str = "caseworker", note: str = "") -> dict[str, Any]:
+        """Stop what a case is spending. `model`: no further model call is made for this case, by an assessment in flight or by anything
+        asked later, until someone resumes it; the agents carry on with patterns and rules, so the case still gets its recommendation.
+        `assessment`: the assessment in flight ends before its next agent and nothing of it is kept. Neither waits for the assessment:
+        a call already sent to the model finishes and is counted, the next one is not made."""
+        case = self.case(tenant, reference)
+        if mode not in ("model", "assessment"):
+            raise ServiceError("say what to stop: 'model' (no more model calls for this case) or 'assessment' (end the assessment in flight)")
+        running = (case.get("progress") or {}).get("state") == "running"
+        if mode == "assessment" and not running:
+            raise ServiceError("no assessment is running on this case", 409)
+        if mode == "model" and S.switch(case):
+            return case
+        self._stops[(tenant, reference)] = {"mode": mode, "by": by, "at": now(), "note": " ".join(str(note or "").split())[:300]}
+        if mode == "model":
+            try:
+                with self._hold(tenant, reference, wait=0.3):   # nobody is working on the case: write it now
+                    case = self.case(tenant, reference)
+                    self._apply_stop(tenant, case)
+                    self.store.save(tenant, case)
+            except ServiceError:   # an assessment has the case: its next model call reads the stop and writes it on the case it is working on
+                pass
+        return self.case(tenant, reference)
+
+    @_held
+    def resume(self, tenant: str, reference: str, *, by: str = "caseworker") -> dict[str, Any]:
+        """Let this case use the model again (its limits still apply)."""
+        case = self.case(tenant, reference)
+        self._stops.pop((tenant, reference), None)
+        if S.switch(case):
+            S.book(case).pop("model_off", None)
+            event(case, "model.resumed", f"Model use was switched back on for this case by {by}.", by=by)
+            self.ledger(tenant).append("spend", by, f"Model use resumed for case {reference}", case=reference)
+            self.store.save(tenant, case)
+        return case
+
+    def spend(self, tenant: str) -> dict[str, Any]:
+        """The workspace's prices, limits and pause, and what its cases have spent."""
+        return {"settings": self.spend_settings(tenant).read(), **S.workspace(self.store.list(tenant))}
+
+    def observability(self, tenant: str, *, limit: int = 1000) -> dict[str, Any]:
+        """What the agents did and what it cost, from the workspace's case files (the most recent `limit` cases)."""
+        cases = []
+        for r in self.store.list(tenant)[:limit]:
+            try:
+                cases.append(self.store.load(tenant, r["reference"]))
+            except (KeyError, OSError, ValueError):
+                continue
+        out = S.observe(cases, self.spend_settings(tenant).read())
+        names = {a["id"]: a["name"] for a in P.AGENTS}
+        for row in (*out["by_agent"], *out["harness"]):
+            row["name"] = names.get(row.get("id") or row.get("agent"), row.get("id") or row.get("agent"))
+        order = [a["id"] for a in P.AGENTS]
+        out["harness"].sort(key=lambda r: order.index(r["agent"]) if r["agent"] in order else 99)
+        out["model"] = {"connected": not getattr(self.model, "offline", True)}
+        return out
+
+    def set_spend(self, tenant: str, payload: dict[str, Any], *, by: str = "caseworker") -> dict[str, Any]:
+        """Change the workspace's prices and limits (a value given as null goes back to the installation's), or pause and resume model use."""
+        payload = dict(payload) if isinstance(payload, dict) else {}
+        note = " ".join(str(payload.pop("note", "") or "").split())[:300]
+        if "paused" in payload:
+            payload["paused"] = {"by": by, "at": now(), "note": note} if payload["paused"] else None
+        before = self.spend_settings(tenant).read()
+        try:
+            after = self.spend_settings(tenant).change(payload)
+        except ValueError as exc:
+            raise ServiceError(str(exc)) from exc
+        changed = {k: [before.get(k), after.get(k)] for k in (*S.NUMBERS, "currency") if before.get(k) != after.get(k)}
+        if bool(before.get("paused")) != bool(after.get("paused")):
+            self.ledger(tenant).append("spend", by, ("Model use paused for the workspace" if after.get("paused") else "Model use resumed for the workspace") + (f": {note}" if note else ""))
+        if changed:
+            self.ledger(tenant).append("spend", by, "Spend settings changed: " + ", ".join(f"{k.replace('_', ' ')} {v[0]} -> {v[1]}" for k, v in changed.items()), data={"changed": changed})
+        return self.spend(tenant)
 
     def _agent(self, tenant: str, case: dict[str, Any], agent_id: str, fn: Any, *, model: Any = None, extra: Any = None, summary: Any = None) -> Any:
         """An on-demand agent, run in the harness under its contract like the stage agents. The result carries whether the contract was kept."""
@@ -203,7 +307,12 @@ class Service:
         tools = self.tools(tenant, case, profile, model, progress=False, record=False)
         tools.ledger = self.ledger(tenant)
         agent = next(a for a in P.AGENTS if a["id"] == agent_id)
-        out, trace = H.Harness(tools).run(agent, case, profile, None, fn, extra=extra)
+        spent = S.totals(case)["calls"]
+        try:
+            out, trace = H.Harness(tools).run(agent, case, profile, None, fn, extra=extra)
+        finally:
+            if S.totals(case)["calls"] != spent:   # what it cost is the case's to keep, whatever became of the answer
+                self.store.save(tenant, case)
         text = summary(out) if summary else agent["output"]
         H.record(tools, case, agent, agent_id, text, trace, "ok" if trace["contract"]["kept"] else "contract not kept")
         if isinstance(out, dict):
@@ -333,7 +442,26 @@ class Service:
         if not live_docs(case):
             raise ServiceError("the case has no documents yet")
         profile = get_profile(case["profile"])
-        P.assess(case, profile, self.tools(tenant, case, profile, model), trigger=trigger, by=by)
+        key = (tenant, reference)
+        if (self._stops.get(key) or {}).get("mode") == "assessment":   # a stop that arrived after the assessment it was meant for had ended
+            self._stops.pop(key, None)
+        try:
+            P.assess(case, profile, self.tools(tenant, case, profile, model), trigger=trigger, by=by)
+        except P.Stopped as exc:   # a person stopped it: nothing of it is kept, what it spent stays counted, and the case is as it was before
+            st = self._stops.pop(key, None) or {}
+            done = list((case.get("working") or {}).get("done") or [])
+            spent = S.since(case, (case.get("working") or {}).get("spend0"))
+            case.pop("working", None)
+            case["progress"] = {"state": "stopped", "stage": (case.get("progress") or {}).get("stage", ""), "done": done,
+                                "error": f"The assessment was {exc}. Nothing of it was kept" + (f"; it had used {spent['tokens']:,} tokens" if spent["tokens"] else "") + ". Assess the case again when you are ready."}
+            event(case, "assessment.stopped", case["progress"]["error"], by=st.get("by") or by, data={"after": done, "spent": spent})
+            self.ledger(tenant).append("spend", st.get("by") or by, f"Assessment of {reference} stopped after {len(done)} of {len(P.STAGES)} agents", case=reference, data={"spent": spent})
+            self.store.save(tenant, case)
+            return case
+        finally:
+            if (self._stops.get(key) or {}).get("mode") == "assessment":
+                self._stops.pop(key, None)
+        self._apply_stop(tenant, case)   # asked during the run and no model call came after it: it still holds for what is asked next
         self.store.save(tenant, case)
         return case
 
@@ -519,7 +647,8 @@ class Service:
 
     def cases_csv(self, tenant: str) -> str:
         names = {p.id: p.name for p in load_profiles().values()}
-        return reports.cases_csv([{**r, "use_case": names.get(r["profile"], r["profile"]), "recommendation": r.get("label")} for r in self.queue(tenant)])
+        return reports.cases_csv([{**r, "use_case": names.get(r["profile"], r["profile"]), "recommendation": r.get("label"), "model_calls": r["spend"]["calls"], "tokens_in": r["spend"]["input_tokens"],
+                                   "tokens_out": r["spend"]["output_tokens"], "cost": r["spend"]["cost"] if r["spend"]["calls"] > r["spend"]["unpriced"] else ""} for r in self.queue(tenant)])
 
     def insights(self, tenant: str, *, limit: int = 500) -> dict[str, Any]:
         """The workspace measured from its case files (the most recent `limit` cases)."""
@@ -530,7 +659,12 @@ class Service:
                 cases.append(self.store.load(tenant, r["reference"]))
             except (KeyError, OSError, ValueError):
                 continue
-        return reports.insights(cases, load_profiles(), total=len(rows))
+        out = reports.insights(cases, load_profiles(), total=len(rows))
+        names = {p.id: p.name for p in load_profiles().values()}
+        out["spend"] = {"settings": {k: v for k, v in self.spend_settings(tenant).read().items() if k != "prices_by_model"}, **S.workspace(rows)}
+        for r in out["spend"]["by_profile"]:
+            r["name"] = names.get(r["profile"], r["profile"])
+        return out
 
     @_held
     def counterfactual(self, tenant: str, reference: str, *, scenario: str | None = None, change: dict[str, Any] | None = None, value: Any = None,

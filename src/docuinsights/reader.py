@@ -260,7 +260,7 @@ def _scan(name: str, data: bytes, mime: str, model: Any, sidecar: str | None, no
             if text.strip():
                 return _out([text], "ocr-model", note)
         except Exception as exc:
-            note = f"{note}; the model could not read it ({type(exc).__name__})".strip("; ")
+            note = (f"{note}; the model was not asked to read it: {exc}" if type(exc).__name__ == "Throttled" else f"{note}; the model could not read it ({type(exc).__name__})").strip("; ")
     local = _tesseract(data) if mime != "application/pdf" else ""
     if local.strip():
         return _out([local], "ocr-local", note)

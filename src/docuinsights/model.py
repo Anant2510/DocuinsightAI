@@ -72,6 +72,9 @@ class BaseModel_:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
+    def about(self, docs: Any) -> None:
+        """The documents the next calls are about. The harness counts spend by them; a model on its own has nothing to do with it."""
+
     def text(self, system: str, user: str, *, images: list[tuple[bytes, str]] | None = None, step: str = "", tier: str = "balanced") -> str:
         raise ModelError("no model connected")
 

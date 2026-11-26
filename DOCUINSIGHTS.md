@@ -418,6 +418,62 @@ At a limit a model call waits. Past the wait it is not made: the agent falls bac
 is marked degraded and says how many calls were not made. Nothing fails because the model is busy. On the CX Nova
 layer the model limiter and the budgets apply; the API gate does not (the layer applies its own).
 
+### Spend, limits and stops
+
+Every model call any agent makes is counted where it is made, in the harness, against the case it was made for: which
+agent, which step, which document, tokens in and out, and money when a price is set. Nothing is estimated. A case
+keeps exact sums (in all, by document, by agent, by kind of work: assessments, questions, drafts, what-if runs) and
+its last 300 calls as a log. One request that names a batch of documents (naming them) is shared out evenly between
+them. Reading a document again costs nothing unless the document changed.
+
+| What | Setting | On the portal |
+| --- | --- | --- |
+| price for a million tokens in and out, and its currency | `DOCUINSIGHTS_PRICE_INPUT`, `DOCUINSIGHTS_PRICE_OUTPUT`, `DOCUINSIGHTS_PRICE_CURRENCY` | How it is governed, Spend and limits |
+| a price for one model by name | `DOCUINSIGHTS_PRICES` (JSON: `{"<model>": {"input": 3, "output": 15}}`) | no |
+| tokens one case may use | `DOCUINSIGHTS_CASE_TOKEN_LIMIT` | yes |
+| money one case may cost | `DOCUINSIGHTS_CASE_COST_LIMIT` | yes |
+| tokens one document may use | `DOCUINSIGHTS_DOC_TOKEN_LIMIT` | yes |
+| cost known models at their published list price until a price is stated (default on) | `DOCUINSIGHTS_LIST_PRICES` | no |
+
+A price is the installation's to state (the contracted rate). Until it does, a model this build knows by name is
+costed at its published list price in US dollars (the table in `spend.py`, with the date it was read), and every
+amount that rests on it is marked **est.** on the screens and `basis: list` in the API. A stated price replaces the
+estimate from the next call on; what was estimated stays marked as estimated. A model the table does not know, an
+installation working in another currency, and one that sets `DOCUINSIGHTS_LIST_PRICES=0` get no assumed price: spend
+is then shown in tokens only, and a call made with no price is never priced afterwards. What a workspace changes on
+the portal is kept in `<data>/<tenant>/spend.json` and laid over the installation's settings.
+
+**Observability** (its own screen, and `GET /api/v1/observability`) is the workspace seen through what its agents did
+and what that cost: token cost, tokens, model calls and the average time of a call; tokens and cost by day; by agent;
+**token cost by case**, most expensive first, with tokens a document; the documents that cost the most; calls held
+back and why; the stops people made; every agent's runs under the harness (contracts kept, average time, model calls,
+calls held back, runs that fell back to patterns, runs that failed); and the latest model calls. It is counted from
+the case files: nothing is sampled. Each agent run on a case also lists its own cost. The top bar says whether AI is
+live or offline, and does not name the model; the model's name stays on the agent runs and in the run records, where
+an auditor needs it.
+
+Three things stop spend, each checked before a call is sent, never after:
+
+* **A limit.** A call that would take the case or a document past its limit is held back (the size of the request is
+  known before it is sent: four characters to a token).
+* **A person.** On a case: *Stop model use* (no further model call for this case, by an assessment in flight or by
+  anything asked later, until someone lets it use the model again) and *Stop the assessment* (the assessment in flight
+  ends before its next agent; nothing of it is kept; what it spent stays counted). Neither waits for the assessment.
+* **A pause.** *Pause model use for the workspace*: every agent runs without the model until it is resumed.
+
+A call that is held back is not an error. The agent that asked falls back to the use case's patterns, exactly as it
+does with no model connected, and its run says why in words ("this case has used 41,200 of its 50,000 tokens, and
+this request is about 12,000 more"). Rules, checks and the recommendation never needed the model, so a case stopped
+this way still gets its recommendation. What only a model could do is then not done and says so: a scan with no OCR
+engine on the machine is reported as not read and asked for again.
+
+A call already sent when a stop arrives finishes, and is counted; the next one is not made. Every stop, resume, pause
+and change of a price or limit is written to the provenance ledger with who did it and why.
+
+API: `GET /api/v1/cases/{ref}/spend`, `POST /api/v1/cases/{ref}/stop` (`{"mode": "model" | "assessment", "note"}`),
+`POST /api/v1/cases/{ref}/resume`, `GET /api/v1/spend`. The case result carries its totals, and the cases export has
+`model_calls`, `tokens_in`, `tokens_out` and `cost`.
+
 ## Run it alone
 
 ```bash
@@ -547,8 +603,11 @@ installation's own lists, and lists that fail to load; totals that are off by a 
 account numbers; a changed account across seven cases; personal data in eighteen forms and thirteen things that only
 look like it; what the masked record, the export, the notification and the knowledge base carry; due dates across
 weekends; a case written by the version before; Word, Excel, email, web page and CSV; a zip bomb; 81 wrong API calls;
-an API without its key. Together the two files hold 225 tests. They read no setting of the machine they run on, and
-pass with and without an OCR engine installed.
+an API without its key; every model call counted against its case, by document, agent and kind of work; prices, and
+calls made before a price was set; limits for a case, a document and a cost; model use and a whole assessment stopped
+while they run; a workspace paused; a known model costed at its list price until a price is stated; the Observability
+figures against the case files. Together the two files hold 233 tests. They read no setting of the machine they run
+on, and pass with and without an OCR engine installed.
 
 ## What is not built yet
 
@@ -587,4 +646,11 @@ pass with and without an OCR engine installed.
 * No malware scan at intake: the checks are type, size and signature.
 * A scanned PDF with no text layer is not read yet. A scanned image (PNG, JPEG) is read by the model, or by Tesseract when it is installed.
 * Source anchors are page and line, not coordinates on the page image.
-* Tokens and cost appear on the layer's run records; the standalone monitor shows tokens per run, not money.
+* **Spend.** Money is tokens times a price (yours, or until then the published list price, marked est.): it is not
+  read from the provider's invoice, and a provider's own extras (cached-token discounts, regional multipliers, image
+  pricing that is not reported as tokens, prices that change with the length of the prompt) are not modelled. The
+  list-price table is a snapshot with a date, not a feed: it does not update itself. A stop does not
+  cut a call that is already on its way to the model: that one finishes and is counted. There is no budget for a
+  month, a team or a use case, only for a case and a document, and no alert before a limit is reached. On the CX Nova
+  layer the counts and limits apply to the calls DocuInsights makes there; the layer's own run records remain the
+  layer's account, and the stop buttons are on the DocuInsights workbench, not on the layer's flow screen.

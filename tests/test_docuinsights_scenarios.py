@@ -43,7 +43,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from docuinsights import assurance as A, pipeline as P, reader, reports, values as V  # noqa: E402
+from docuinsights import spend as SP  # noqa: E402
 from docuinsights.ledger import Ledger  # noqa: E402
+from docuinsights.model import BaseModel_, ModelError  # noqa: E402
 from docuinsights.profiles import Profile, ProfileError, get_profile, load_profiles  # noqa: E402
 from docuinsights.service import Service, ServiceError  # noqa: E402
 from docuinsights.store import StoreError  # noqa: E402
@@ -1273,3 +1275,314 @@ def test_the_api_is_closed_without_its_key_and_slows_down_a_guesser(live):
     codes = [call("GET", "/api/cases", key=f"guess-{i}")[0] for i in range(30)]
     assert 429 in codes and codes[0] == 401, "after enough wrong keys the address is refused whatever it sends"
     assert call("GET", "/api/cases")[0] == 429, "even the right key waits, so a short key cannot be found by trying"
+
+
+# ================================================================================================ 12. what a case costs, and what stops it
+class Billed(BaseModel_):
+    """A connected model that is billed like one and answers nothing useful, so every agent falls back to the use case's patterns:
+    what is spent can be counted exactly, and the outcome is the one the patterns give."""
+
+    offline, name = False, "billed-model"
+
+    def __init__(self, delay: float = 0.0, fail: bool = False, name: str = "billed-model") -> None:
+        super().__init__()
+        self.delay, self.fail, self.name = delay, fail, name
+
+    def text(self, system, user, *, images=None, step="", tier="balanced", **kw):
+        t0 = time.perf_counter()
+        time.sleep(self.delay)
+        if self.fail:
+            self._record(step, t0, error="HTTP 500", model=self.name)
+            raise ModelError("the model answered HTTP 500")
+        self._record(step, t0, {"input_tokens": (len(system) + len(user)) // 4, "output_tokens": 100}, model=self.name)
+        return "{}"
+
+    def describe(self):
+        return {"provider": "test", "model": self.name, "offline": False}
+
+
+def billed(tmp_path, **kw) -> tuple[Service, Billed]:
+    model = Billed(**kw)
+    return Service(tmp_path / "billed", model=model), model
+
+
+def run_notes(case: dict) -> str:
+    return " | ".join(n for r in case["assessment"]["runs"] for n in r.get("notes") or [])
+
+
+def test_every_model_call_is_counted_against_its_case_by_document_agent_and_kind_of_work(tmp_path):
+    svc, model = billed(tmp_path)
+    case = svc.assess(T, svc.load_sample(T, "customs_claim", "positive")["reference"])
+    assert_holds(svc, case)
+    spent, made = SP.summary(case, svc.spend_settings(T).read()), model.calls
+    assert made and spent["totals"]["calls"] == len(made) and spent["totals"]["input_tokens"] == sum(c["input_tokens"] for c in made) and spent["totals"]["output_tokens"] == sum(c["output_tokens"] for c in made)
+    assert spent["totals"]["priced"] is False and spent["totals"]["cost"] == 0 and spent["totals"]["unpriced"] == len(made), "no price is set: nothing is turned into money"
+    assert sum(d["tokens"] for d in spent["documents"]) == spent["totals"]["tokens"] and {d["id"] for d in spent["documents"]} == {d["id"] for d in case["documents"]}, "every token of an assessment is some document's"
+    assert abs(sum(d["calls"] for d in spent["documents"]) - len(made)) < 0.01 and all(d["shared"] == 1 for d in spent["documents"]), "the one request that named the batch is shared, and counted once"
+    assert {a["id"]: a["calls"] for a in spent["agents"]} == {"intake": 1, "classify": 1, "extract": 5} and [a["id"] for a in spent["activities"]] == ["assessment"]
+    assert case["assessment"]["metrics"]["spend"]["tokens"] == spent["totals"]["tokens"] and len(spent["log"]) == len(made) and spent["log"][0]["doc_names"]
+    # a question, a draft and a what-if are counted as what they are, against the same case
+    svc.ask(T, case["reference"], "What is missing?")
+    svc.correspondence(T, case["reference"], "evidence_request")
+    case = svc.case(T, case["reference"])
+    kinds = {a["id"]: a["calls"] for a in SP.summary(case)["activities"]}
+    assert kinds["questions"] == 1 and kinds["drafts"] == 1 and SP.totals(case)["calls"] == len(model.calls) == 9
+    svc.counterfactual(T, case["reference"], scenario="add_packing_list")
+    case = svc.case(T, case["reference"])
+    assert SP.totals(case)["calls"] == len(model.calls), "a what-if run is counted against the case it was asked about"
+    # documents that have not changed are not read again: assessing again costs nothing more
+    before = SP.totals(case)["tokens"]
+    again = svc.assess(T, case["reference"])
+    assert SP.totals(again)["tokens"] == before and again["assessment"]["metrics"]["spend"]["calls"] == 0
+    rows = svc.queue(T)
+    assert rows[0]["spend"]["calls"] == len(model.calls) and "tokens_in" in svc.cases_csv(T).splitlines()[0]
+    assert svc.insights(T)["spend"]["totals"]["tokens"] == SP.totals(again)["tokens"] and svc.insights(T)["spend"]["top"][0]["reference"] == case["reference"]
+    # a call that failed is a call, with no tokens
+    broken, m2 = billed(tmp_path / "x", fail=True)
+    failed = broken.assess(T, broken.load_sample(T, "supplier_invoice", "clean")["reference"])
+    t = SP.totals(failed)
+    assert t["calls"] == len(m2.calls) > 0 and t["failed"] == t["calls"] and t["tokens"] == 0 and failed["assessment"]["recommendation"]["outcome"] == "proceed"
+    assert_holds(broken, failed)
+
+
+def test_a_price_turns_tokens_into_money_and_what_was_spent_before_it_is_not_guessed(tmp_path, monkeypatch):
+    svc, model = billed(tmp_path)
+    first = svc.assess(T, svc.load_sample(T, "supplier_invoice", "clean")["reference"])
+    out = svc.set_spend(T, {"price_input": 3, "price_output": "15", "currency": "eur"}, by="sam")
+    assert out["settings"]["priced"] and out["settings"]["currency"] == "EUR" and out["settings"]["changed"] == ["currency", "price_input", "price_output"]
+    n0 = len(model.calls)
+    second = svc.assess(T, svc.load_sample(T, "supplier_invoice", "mismatch")["reference"])
+    mine = model.calls[n0:]
+    t = SP.totals(second)
+    assert t["priced"] and t["currency"] == "EUR" and t["unpriced"] == 0
+    assert abs(t["cost"] - sum(c["input_tokens"] * 3 + c["output_tokens"] * 15 for c in mine) / 1e6) < 1e-6
+    assert abs(sum(d["cost"] for d in SP.summary(second)["documents"]) - t["cost"]) < 1e-5, "shared out by document, the money still adds up"
+    assert SP.totals(svc.case(T, first["reference"]))["priced"] is False, "what was spent before a price was set stays in tokens"
+    ws = svc.spend(T)
+    assert ws["totals"]["unpriced"] == n0 and abs(ws["totals"]["cost"] - t["cost"]) < 1e-6 and ws["cases_with_spend"] == 2
+    # the installation's own price (the environment), a price for one model by name, and going back to it
+    monkeypatch.setenv("DOCUINSIGHTS_PRICE_INPUT", "1")
+    monkeypatch.setenv("DOCUINSIGHTS_PRICES", json.dumps({"billed-model": {"input": 10, "output": 20}}))
+    assert svc.set_spend(T, {"price_input": None, "price_output": None, "currency": ""})["settings"]["price_input"] == 1.0
+    assert SP.cost_of({"model": "billed-model", "input_tokens": 1_000_000, "output_tokens": 0}, svc.spend_settings(T).read()) == 10.0
+    assert SP.cost_of({"model": "another", "input_tokens": 1_000_000, "output_tokens": 0}, svc.spend_settings(T).read()) == 1.0
+    monkeypatch.setenv("DOCUINSIGHTS_PRICES", "{not json")
+    assert SP.defaults()["prices_by_model"] == {}
+    for bad in ({"price_input": -1}, {"price_output": "a lot"}, {"case_token_limit": float("nan")}, {"currency": "12"}, {"doc_token_limit": 1e13}):
+        with pytest.raises(ServiceError):
+            svc.set_spend(T, bad)
+    assert svc.ledger(T).verify()["ok"] and any("Spend settings changed" in e["summary"] for e in svc.ledger(T).entries(limit=200))
+
+
+def test_a_limit_holds_the_model_back_before_the_call_and_the_case_is_still_assessed(tmp_path):
+    plain = Service(tmp_path / "plain")   # the same case with no model at all: what the patterns alone conclude
+    want = plain.assess(T, plain.load_sample(T, "loan_application", "clean")["reference"])["assessment"]["recommendation"]["outcome"]
+    svc, model = billed(tmp_path)
+    free = svc.assess(T, svc.load_sample(T, "customs_claim", "positive", reference="FREE")["reference"])
+    need = SP.totals(free)["tokens"]
+    # one case may use half of that
+    svc.set_spend(T, {"case_token_limit": need // 2})
+    held = svc.assess(T, svc.load_sample(T, "customs_claim", "positive", reference="HELD")["reference"])
+    assert_holds(svc, held)
+    t = SP.totals(held)
+    assert 0 < t["tokens"] <= need // 2, f"never past the limit: {t['tokens']} of {need // 2}"
+    assert "tokens" in run_notes(held) and "not asked" in run_notes(held) and held["assessment"]["recommendation"]["outcome"] == free["assessment"]["recommendation"]["outcome"]
+    assert SP.summary(held, svc.spend_settings(T).read())["limits"]["share"] <= 1
+    with pytest.raises(Exception) as err:
+        SP.check(held, {**svc.spend_settings(T).read(), "case_token_limit": t["tokens"]}, [])
+    assert "limit" in str(err.value)
+    # one document may use very little: the batch request is held back for all of them, and each is told why
+    svc.set_spend(T, {"case_token_limit": 0, "doc_token_limit": 50})
+    tight = svc.assess(T, svc.load_sample(T, "loan_application", "clean")["reference"])
+    assert SP.totals(tight)["calls"] == 0 and "one document may use" in run_notes(tight) and tight["assessment"]["recommendation"]["outcome"] == want, "held back for every document, and assessed as with no model"
+    # money: a case may cost a hundredth of a cent
+    svc.set_spend(T, {"doc_token_limit": 0, "price_input": 3, "price_output": 15, "case_cost_limit": 0.0001})
+    dear = svc.assess(T, svc.load_sample(T, "supplier_invoice", "mismatch")["reference"])
+    assert 1 <= SP.totals(dear)["calls"] <= 2 and "its limit of" in run_notes(dear), "the first call is made; the next sees what it cost"
+    assert SP.summary(dear, svc.spend_settings(T).read())["limits"]["reached"] == ["the case's cost limit"]
+    assert_holds(svc, dear)
+
+
+def test_a_person_stops_model_use_or_the_whole_assessment_while_it_runs(tmp_path):
+    svc, model = billed(tmp_path, delay=0.15)
+    ref = svc.load_sample(T, "customs_claim", "positive")["reference"]
+    svc.assess_in_background(T, ref)
+    while not model.calls:
+        time.sleep(0.02)
+    t0 = time.perf_counter()
+    out = svc.stop(T, ref, "model", by="maria", note="  too  costly ")
+    took, at_stop = time.perf_counter() - t0, len(model.calls)
+    svc._running[(T, ref)].join(timeout=30)
+    case = svc.case(T, ref)
+    assert took < 1.5, f"a stop does not wait for the assessment ({took:.2f}s)"
+    assert len(model.calls) <= at_stop + 1, "a call already sent finishes; the next is not made"
+    assert case["progress"]["state"] == "done" and case["assessment"]["recommendation"]["outcome"] and SP.switch(case)["by"] == "maria" and SP.switch(case)["note"] == "too costly"
+    assert "model use was stopped for this case by maria" in run_notes(case) and [e["kind"] for e in case["events"]].count("model.stopped") == 1
+    assert_holds(svc, case)
+    n = len(model.calls)
+    svc.ask(T, ref, "What is missing?")   # it holds for everything asked later, not only for the run it interrupted
+    assert len(model.calls) == n and svc.stop(T, ref, "model", by="sam")["spend"]["model_off"]["by"] == "maria", "stopping twice changes nothing"
+    assert not SP.switch(svc.resume(T, ref, by="sam")) and "model.resumed" in [e["kind"] for e in svc.case(T, ref)["events"]]
+    svc.ask(T, ref, "What is missing?")
+    assert len(model.calls) == n + 1
+    # at rest: written at once, and the next assessment does not use the model
+    ref2 = svc.load_sample(T, "supplier_invoice", "clean")["reference"]
+    assert SP.switch(svc.stop(T, ref2, "model", by="maria"))
+    quiet = svc.assess(T, ref2)
+    assert SP.totals(quiet)["calls"] == 0 and quiet["assessment"]["recommendation"]["outcome"] == "proceed"
+    # the whole assessment: it ends before its next agent, nothing of it is kept, what it spent stays counted, and it can be run again
+    ref3 = svc.load_sample(T, "insurance_claim", "clean")["reference"]
+    svc.assess_in_background(T, ref3)
+    n = len(model.calls)
+    while len(model.calls) == n:
+        time.sleep(0.02)
+    svc.stop(T, ref3, "assessment", by="maria", note="wrong package")
+    svc._running[(T, ref3)].join(timeout=30)
+    gone = svc.case(T, ref3)
+    assert gone["progress"]["state"] == "stopped" and "stopped by maria: wrong package" in gone["progress"]["error"] and not gone.get("assessment") and "working" not in gone
+    assert SP.totals(gone)["calls"] >= 1 and "assessment.stopped" in [e["kind"] for e in gone["events"]] and (T, ref3) not in svc._stops
+    done = svc.assess(T, ref3)
+    assert done["progress"]["state"] == "done" and done["assessment"]["id"] == "A1" and done["assessment"]["recommendation"]["outcome"] == "proceed"
+    assert_holds(svc, done)
+    # an assessed case that is stopped mid-way keeps the assessment it had
+    svc.add_document(T, ref3, "note.txt", b"Internal note: adjuster visit booked")
+    svc.assess_in_background(T, ref3)
+    time.sleep(0.05)
+    svc.stop(T, ref3, "assessment", by="maria")
+    svc._running[(T, ref3)].join(timeout=30)
+    kept = svc.case(T, ref3)
+    assert kept["progress"]["state"] in ("stopped", "done") and kept["assessment"]["id"] in ("A1", "A2") and (kept["progress"]["state"] == "done") == (kept["assessment"]["id"] == "A2")
+    # what cannot be stopped says so
+    with pytest.raises(ServiceError) as err:
+        svc.stop(T, ref2, "assessment")
+    assert err.value.status == 409
+    for bad in ("everything", "", None):
+        with pytest.raises(ServiceError):
+            svc.stop(T, ref2, bad)
+    with pytest.raises(ServiceError):
+        svc.stop(T, "NOPE", "model")
+    assert svc.ledger(T).verify()["ok"] and sum(1 for e in svc.ledger(T).entries(limit=500) if e["kind"] == "spend") >= 4
+
+
+def test_the_whole_workspace_is_paused_and_resumed(tmp_path):
+    svc, model = billed(tmp_path)
+    out = svc.set_spend(T, {"paused": True, "note": "month end"}, by="sam")
+    assert out["settings"]["paused"]["by"] == "sam" and out["settings"]["paused"]["note"] == "month end"
+    case = svc.assess(T, svc.load_sample(T, "trade_finance", "listed")["reference"])
+    assert not model.calls and "model use is paused for this workspace (by sam)" in run_notes(case) and statuses(case)["SCR-1"] == "review", "paused: no call, and the case is still screened and assessed"
+    assert SP.summary(case, svc.spend_settings(T).read())["paused"]["by"] == "sam"
+    assert_holds(svc, case)
+    svc.ask(T, case["reference"], "Who is the carrier?")
+    assert not model.calls
+    assert svc.set_spend(T, {"paused": False}, by="sam")["settings"]["paused"] is None
+    svc.ask(T, case["reference"], "Who is the carrier?")
+    assert len(model.calls) == 1
+    said = [e["summary"] for e in svc.ledger(T).entries(limit=200) if e["kind"] == "spend"]
+    assert any("paused" in x and "month end" in x for x in said) and any("resumed" in x for x in said)
+    # another workspace of the same installation is not paused by this one, and keeps its own count
+    svc.set_spend(T, {"paused": True})
+    other = svc.assess("other", svc.load_sample("other", "supplier_invoice", "clean")["reference"])
+    assert SP.totals(other)["calls"] > 0 and svc.spend("other")["settings"]["paused"] is None and svc.spend(T)["totals"]["calls"] == 1
+
+
+def test_spend_and_the_stops_over_the_api(live):
+    call, service = live
+    status, made = call("POST", "/api/samples", {"profile": "supplier_invoice", "sample": "clean"})
+    ref = made["reference"]
+    for _ in range(200):
+        status, case = call("GET", f"/api/cases/{ref}")
+        if (case.get("progress") or {}).get("state") in ("done", "failed"):
+            break
+        time.sleep(0.05)
+    assert case["spend"]["totals"]["calls"] == 0 and case["spend"]["limits"]["reached"] == [] and case["stop_requested"] is None, "no model is connected: nothing was spent"
+    status, ws = call("GET", "/api/spend")
+    assert status == 200 and ws["settings"]["priced"] is False and ws["totals"]["tokens"] == 0 and ws["cases"] == 1
+    status, ws = call("POST", "/api/spend", {"price_input": 2.5, "price_output": 10, "case_token_limit": 50000}, headers={"x-docuinsights-user": "Sam"})
+    assert status == 200 and ws["settings"]["case_token_limit"] == 50000 and ws["settings"]["price_input"] == 2.5
+    for bad in ({"price_input": "x"}, {"case_token_limit": -5}, {"currency": "$$"}):
+        status, out = call("POST", "/api/spend", bad)
+        assert status == 400 and out["detail"], (bad, out)
+    status, off = call("POST", f"/api/cases/{ref}/stop", {"mode": "model", "note": "not this one"}, headers={"x-docuinsights-user": "Maria"})
+    assert status == 200 and off["spend"]["model_off"]["by"] == "Maria"
+    status, v1 = call("GET", f"/api/v1/cases/{ref}")
+    assert v1["spend"]["model_off"]["note"] == "not this one" and v1["spend"]["tokens"] == 0
+    status, on = call("POST", f"/api/cases/{ref}/resume", {})
+    assert status == 200 and on["spend"]["model_off"] is None
+    for path, body, code in ((f"/api/cases/{ref}/stop", {"mode": "assessment"}, 409), (f"/api/cases/{ref}/stop", {"mode": "nope"}, 400), ("/api/cases/NOPE/stop", {"mode": "model"}, 404), ("/api/cases/NOPE/resume", {}, 404),
+                             (f"/api/v1/cases/{ref}/stop", {"mode": ["model"]}, 400)):
+        status, out = call("POST", path, body)
+        assert status == code and out["detail"], (path, body, status, out)
+    status, sp = call("GET", f"/api/v1/cases/{ref}/spend")
+    assert status == 200 and sp["totals"]["calls"] == 0 and sp["limits"]["case_token_limit"] == 50000
+    status, ins = call("GET", "/api/insights")
+    assert ins["spend"]["settings"]["case_token_limit"] == 50000 and ins["spend"]["cases"] == 1
+    status, sheet = call("GET", "/api/export/cases.csv")
+    assert sheet.splitlines()[0].endswith("model_calls,tokens_in,tokens_out,cost")
+    for path in ("/api/observability", "/api/v1/observability"):
+        status, seen = call("GET", path)
+        assert status == 200 and seen["totals"]["calls"] == 0 and seen["cases"] == 1 and len(seen["by_day"]) == 14 and len(seen["harness"]) == 14 and seen["model"]["connected"] is False
+        assert all(h["runs"] == 1 and h["kept"] == 1 and h["failed"] == 0 for h in seen["harness"]) and seen["settings"]["case_token_limit"] == 50000 and "prices_by_model" not in seen["settings"]
+    assert service.ledger(T).verify()["ok"]
+
+
+def test_a_known_model_is_costed_at_its_published_list_price_until_a_price_is_stated(tmp_path, monkeypatch):
+    svc, model = billed(tmp_path, name="claude-sonnet-5-5")
+    assert svc.spend(T)["settings"]["estimates"] is True and svc.spend(T)["settings"]["priced"] is False
+    case = svc.assess(T, svc.load_sample(T, "supplier_invoice", "clean")["reference"])
+    t = SP.totals(case)
+    assert t["basis"] == "list" and t["currency"] == "USD" and t["listed"] == t["calls"] == len(model.calls) and t["unpriced"] == 0
+    assert abs(t["cost"] - sum(c["input_tokens"] * 2 + c["output_tokens"] * 10 for c in model.calls) / 1e6) < 1e-6, "USD 2 in and 10 out for a million tokens"
+    runs = [r for r in case["assessment"]["runs"] if r["model_calls"]]
+    assert runs and abs(sum(r["cost"] for r in runs) - t["cost"]) < 1e-6 and all(r["cost"] is None for r in case["assessment"]["runs"] if not r["model_calls"]), "each agent run lists what it cost"
+    assert all(d["listed"] and d["cost"] > 0 for d in SP.summary(case)["documents"]) and SP.summary(case)["log"][0]["cost"] > 0
+    # a stated price replaces the estimate from the next call on; what was estimated stays marked as estimated
+    svc.set_spend(T, {"price_input": 1.5, "price_output": 7.5})
+    n0 = len(model.calls)
+    second = svc.assess(T, svc.load_sample(T, "supplier_invoice", "mismatch")["reference"])
+    t2 = SP.totals(second)
+    assert t2["basis"] == "set" and t2["listed"] == 0 and abs(t2["cost"] - sum(c["input_tokens"] * 1.5 + c["output_tokens"] * 7.5 for c in model.calls[n0:]) / 1e6) < 1e-6
+    assert svc.spend(T)["totals"]["basis"] == "mixed" and svc.spend(T)["settings"]["estimates"] is False
+    # names as providers write them, the nearest longer name, and models this table does not know
+    assert SP.list_price("azure/Claude-Sonnet-5-5-20261001") == (2.0, 10.0) and SP.list_price("claude-opus-5-5") == (4.0, 20.0) and SP.list_price("claude-opus-5") == (5.0, 25.0)
+    assert SP.list_price("claude-haiku-5-5") == (0.10, 0.50) and SP.list_price("my-own-llm") is None and SP.list_price("") is None and SP.list_price(None) is None
+    plain = SP.defaults({})
+    assert SP.price_of("my-own-llm", plain) == (0.0, 0.0, None) and SP.cost_of({"model": "my-own-llm", "input_tokens": 5000, "output_tokens": 5000}, plain) is None, "an unknown model is counted in tokens, never guessed at"
+    # an installation that wants no assumed price, and one that works in another currency: tokens only until it states its own
+    assert SP.price_of("claude-sonnet-5-5", SP.defaults({"DOCUINSIGHTS_LIST_PRICES": "0"})) == (0.0, 0.0, None)
+    assert SP.price_of("claude-sonnet-5-5", {**plain, "currency": "EUR"}) == (0.0, 0.0, None) and SP.Settings().read()["list_prices_as_of"] == SP.LIST_PRICES_AS_OF
+    monkeypatch.setenv("DOCUINSIGHTS_LIST_PRICES", "off")
+    quiet, m3 = billed(tmp_path / "q", name="claude-sonnet-5-5")
+    t3 = SP.totals(quiet.assess(T, quiet.load_sample(T, "supplier_invoice", "clean")["reference"]))
+    assert t3["calls"] > 0 and t3["basis"] == "none" and t3["cost"] == 0 and t3["unpriced"] == t3["calls"]
+
+
+def test_observability_counts_what_the_agents_did_and_what_it_cost(tmp_path):
+    svc, model = billed(tmp_path, name="claude-sonnet-5-5")
+    assert svc.observability(T)["totals"]["calls"] == 0 and svc.observability(T)["by_case"] == [] and svc.observability(T)["harness"] == []
+    refs = [svc.load_sample(T, p, s)["reference"] for p, s in (("customs_claim", "positive"), ("supplier_invoice", "clean"), ("insurance_claim", "clean"))]
+    svc.assess(T, refs[0])
+    svc.stop(T, refs[1], "model", by="maria")
+    svc.assess(T, refs[1])                          # assessed with model use stopped: nothing spent, and no call is even asked for
+    svc.set_spend(T, {"case_token_limit": 700})
+    svc.assess(T, refs[2])                          # held back by the limit part of the way
+    svc.set_spend(T, {"case_token_limit": 0})
+    seen = svc.observability(T)
+    cases = [svc.case(T, r) for r in refs]
+    assert seen["cases"] == 3 and seen["cases_with_spend"] == 2 and seen["model"]["connected"] is True
+    assert seen["totals"]["calls"] == len(model.calls) == sum(SP.totals(c)["calls"] for c in cases) and seen["totals"]["tokens"] == sum(SP.totals(c)["tokens"] for c in cases)
+    assert abs(seen["totals"]["cost"] - sum(SP.totals(c)["cost"] for c in cases)) < 1e-6 and seen["totals"]["basis"] == "list" and seen["average_tokens"] == round(seen["totals"]["tokens"] / 2)
+    today = seen["by_day"][-1]
+    assert len(seen["by_day"]) == 14 and today["tokens"] == seen["totals"]["tokens"] and today["calls"] == seen["totals"]["calls"] and all(d["tokens"] == 0 for d in seen["by_day"][:-1])
+    assert sum(a["tokens"] for a in seen["by_agent"]) == seen["totals"]["tokens"] and {a["name"] for a in seen["by_agent"]} <= {"Intake Agent", "Classification Agent", "Extraction Agent"}
+    assert [r["reference"] for r in seen["by_case"]] == sorted((r for r in refs if SP.totals(svc.case(T, r))["calls"]), key=lambda r: -SP.totals(svc.case(T, r))["tokens"])
+    assert all(r["cost"] > 0 and r["basis"] == "list" and r["per_document"] == round(r["tokens"] / r["documents"]) for r in seen["by_case"])
+    assert seen["by_document"] == sorted(seen["by_document"], key=lambda d: -d["tokens"]) and sum(d["tokens"] for d in seen["by_document"]) == seen["totals"]["tokens"]
+    assert [h["name"] for h in seen["harness"]] == [a["name"] for a in __import__("docuinsights.pipeline", fromlist=["AGENTS"]).AGENTS if a["id"] in {r["agent"] for r in cases[0]["assessment"]["runs"]}]
+    assert all(h["runs"] == 3 and h["kept"] == 3 and h["failed"] == 0 for h in seen["harness"]) and sum(h["model_calls"] for h in seen["harness"]) == len(model.calls)
+    assert seen["held"]["model_stops"] == 1 and seen["held"]["calls"] >= 1 and seen["held"]["reasons"].get("a limit", 0) >= 1 and seen["held"]["assessments_stopped"] == 0
+    assert len(seen["calls"]) == len(model.calls) and [c["at"] for c in seen["calls"]] == sorted((c["at"] for c in seen["calls"]), reverse=True) and all(c["reference"] in refs for c in seen["calls"])
+    # a case with a great many calls keeps a log of the last 300, and its sums stay exact
+    big = svc.case(T, refs[0])
+    for _ in range(40):
+        SP.record(big, "extract", [{"model": "claude-sonnet-5-5", "step": "extract", "input_tokens": 10, "output_tokens": 1, "ms": 5}] * 10, ["D1"], svc.spend_settings(T).read())
+    assert len(big["spend"]["log"]) == SP.LOG and SP.totals(big)["calls"] == SP.totals(cases[0])["calls"] + 400

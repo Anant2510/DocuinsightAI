@@ -41,7 +41,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 
-from . import PRODUCT, __version__
+from . import PRODUCT, __version__, spend
 from .assurance import due_state
 from .profiles import ProfileError
 from .service import Service, ServiceError
@@ -79,7 +79,8 @@ def result(case: dict[str, Any]) -> dict[str, Any]:
                           "basis": [{k: b.get(k) for k in ("id", "name", "of", "citation")} for b in f.get("basis") or []]} for f in a.get("findings") or []],
             "triage": a.get("triage"), "screening": {k: (a.get("screening") or {}).get(k) for k in ("lists", "hits")} if a.get("screening") else None,
             "personal_data": [{k: c.get(k) for k in ("id", "name", "count")} for c in (a.get("privacy") or {}).get("categories") or []],
-            "assigned": case.get("assigned"), "decision": case.get("decision"), "filed": case.get("filed")}
+            "assigned": case.get("assigned"), "decision": case.get("decision"), "filed": case.get("filed"),
+            "spend": {**spend.totals(case), "model_off": spend.switch(case)}}
 
 
 def create_app(service: Service | None = None, *, tenant_of: Callable[[Request], str] | None = None, actor_of: Callable[[Request], str] | None = None,
@@ -154,6 +155,13 @@ def create_app(service: Service | None = None, *, tenant_of: Callable[[Request],
         return endpoint
 
     T, A = tenant, actor
+
+    def shown(r: Request, case: dict[str, Any]) -> dict[str, Any]:
+        """The case as the workbench gets it, with its spend set against the workspace's limits and any stop still on its way to it."""
+        out = view(case)
+        out["spend"] = spend.summary(case, svc.spend_settings(T(r)).read())
+        out["stop_requested"] = svc._stops.get((T(r), case["reference"]))
+        return out
     ref = lambda r: r.path_params["ref"]  # noqa: E731
 
     def config(r: Request) -> dict[str, Any]:
@@ -172,18 +180,18 @@ def create_app(service: Service | None = None, *, tenant_of: Callable[[Request],
         add_documents(r, case["reference"], d.get("documents") or [])
         if d.get("assess") and d.get("documents"):
             svc.assess_in_background(T(r), case["reference"], by=A(r))
-        return view(svc.case(T(r), case["reference"])), 201
+        return shown(r, svc.case(T(r), case["reference"])), 201
 
     def sample(r: Request, d: dict[str, Any]) -> Any:
         case = svc.load_sample(T(r), str(d.get("profile") or ""), str(d.get("sample") or ""), by=A(r))
         svc.assess_in_background(T(r), case["reference"], by=A(r))
-        return view(svc.case(T(r), case["reference"])), 201
+        return shown(r, svc.case(T(r), case["reference"])), 201
 
     def upload(r: Request, d: dict[str, Any]) -> Any:
         add_documents(r, ref(r), d.get("documents") or [], d.get("replaces"))
         if d.get("assess"):
             svc.assess_in_background(T(r), ref(r), by=A(r), trigger="amendment" if svc.case(T(r), ref(r)).get("assessment") else "assessment")
-        return view(svc.case(T(r), ref(r)))
+        return shown(r, svc.case(T(r), ref(r)))
 
     def file(r: Request) -> Response:
         v = r.query_params.get("v")
@@ -278,19 +286,24 @@ def create_app(service: Service | None = None, *, tenant_of: Callable[[Request],
         Route("/api/cases", api(lambda r: svc.cases(T(r)))),
         Route("/api/cases", api(create, body=True), methods=["POST"]),
         Route("/api/samples", api(sample, body=True), methods=["POST"]),
-        Route("/api/cases/{ref}", api(lambda r: view(svc.case(T(r), ref(r))))),
+        Route("/api/cases/{ref}", api(lambda r: shown(r, svc.case(T(r), ref(r))))),
         Route("/api/cases/{ref}/documents", api(upload, body=True), methods=["POST"]),
         Route("/api/cases/{ref}/documents/{doc}/file", api(file)),
-        Route("/api/cases/{ref}/assess", api(lambda r, d: (view(svc.assess_in_background(T(r), ref(r), by=A(r), trigger=str(d.get("trigger") or "assessment"))), 202), body=True), methods=["POST"]),
-        Route("/api/cases/{ref}/amendment", api(lambda r, d: view(svc.next_amendment(T(r), ref(r), by=A(r))), body=True), methods=["POST"]),
-        Route("/api/cases/{ref}/review", api(lambda r, d: view(svc.review(T(r), ref(r), d, by=A(r))), body=True), methods=["POST"]),
-        Route("/api/cases/{ref}/decision", api(lambda r, d: view(svc.decide(T(r), ref(r), str(d.get("decision") or ""), str(d.get("note") or ""), by=A(r))), body=True), methods=["POST"]),
+        Route("/api/cases/{ref}/assess", api(lambda r, d: (shown(r, svc.assess_in_background(T(r), ref(r), by=A(r), trigger=str(d.get("trigger") or "assessment"))), 202), body=True), methods=["POST"]),
+        Route("/api/cases/{ref}/amendment", api(lambda r, d: shown(r, svc.next_amendment(T(r), ref(r), by=A(r))), body=True), methods=["POST"]),
+        Route("/api/cases/{ref}/review", api(lambda r, d: shown(r, svc.review(T(r), ref(r), d, by=A(r))), body=True), methods=["POST"]),
+        Route("/api/cases/{ref}/decision", api(lambda r, d: shown(r, svc.decide(T(r), ref(r), str(d.get("decision") or ""), str(d.get("note") or ""), by=A(r))), body=True), methods=["POST"]),
         Route("/api/cases/{ref}/counterfactual", api(lambda r, d: svc.counterfactual(T(r), ref(r), scenario=d.get("scenario"), change=d.get("change"), value=d.get("value")), body=True), methods=["POST"]),
         Route("/api/cases/{ref}/correspondence", api(lambda r, d: svc.correspondence(T(r), ref(r), str(d.get("kind") or "evidence_request")), body=True), methods=["POST"]),
         Route("/api/cases/{ref}/ask", api(lambda r, d: svc.ask(T(r), ref(r), str(d.get("question") or "")), body=True), methods=["POST"]),
         Route("/api/cases/{ref}/file", api(lambda r, d: svc.file_case(T(r), ref(r), by=A(r)), body=True), methods=["POST"]),
-        Route("/api/cases/{ref}/assign", api(lambda r, d: view(svc.assign(T(r), ref(r), str(d.get("to") or ""), by=A(r))), body=True), methods=["POST"]),
+        Route("/api/cases/{ref}/assign", api(lambda r, d: shown(r, svc.assign(T(r), ref(r), str(d.get("to") or ""), by=A(r))), body=True), methods=["POST"]),
         Route("/api/cases/{ref}/record", api(record)),
+        Route("/api/cases/{ref}/stop", api(lambda r, d: shown(r, svc.stop(T(r), ref(r), str(d.get("mode") or "model"), by=A(r), note=str(d.get("note") or ""))), body=True), methods=["POST"]),
+        Route("/api/cases/{ref}/resume", api(lambda r, d: shown(r, svc.resume(T(r), ref(r), by=A(r))), body=True), methods=["POST"]),
+        Route("/api/spend", api(lambda r: svc.spend(T(r)))),
+        Route("/api/spend", api(lambda r, d: svc.set_spend(T(r), d, by=A(r)), body=True), methods=["POST"]),
+        Route("/api/observability", api(lambda r: svc.observability(T(r)))),
         Route("/api/insights", api(lambda r: svc.insights(T(r)))),
         Route("/api/export/cases.csv", api(cases_csv)),
         Route("/api/feedback/{profile}", api(lambda r: svc.feedback(T(r), r.path_params["profile"]))),
@@ -319,6 +332,11 @@ def create_app(service: Service | None = None, *, tenant_of: Callable[[Request],
         Route("/api/v1/cases", api(v1_submit, body=True), methods=["POST"]),
         Route("/api/v1/cases/{ref}", api(lambda r: result(svc.case(T(r), ref(r))))),
         Route("/api/v1/cases/{ref}/record", api(record)),
+        Route("/api/v1/cases/{ref}/spend", api(lambda r: spend.summary(svc.case(T(r), ref(r)), svc.spend_settings(T(r)).read()))),
+        Route("/api/v1/cases/{ref}/stop", api(lambda r, d: result(svc.stop(T(r), ref(r), str(d.get("mode") or "model"), by=A(r), note=str(d.get("note") or ""))), body=True), methods=["POST"]),
+        Route("/api/v1/cases/{ref}/resume", api(lambda r, d: result(svc.resume(T(r), ref(r), by=A(r))), body=True), methods=["POST"]),
+        Route("/api/v1/spend", api(lambda r: svc.spend(T(r)))),
+        Route("/api/v1/observability", api(lambda r: svc.observability(T(r)))),
         Route("/api/v1/insights", api(lambda r: svc.insights(T(r)))),
         Route("/api/v1/cases/{ref}/ask", api(lambda r, d: svc.ask(T(r), ref(r), str(d.get("question") or "")), body=True), methods=["POST"]),
         Route("/api/v1/health", api(lambda r: {"product": PRODUCT, "version": __version__, "model": svc.config()["model"], "repository": svc.repository.status()})),

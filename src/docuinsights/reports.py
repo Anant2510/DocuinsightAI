@@ -129,7 +129,7 @@ def insights(cases: list[dict[str, Any]], profiles: dict[str, Profile], *, today
 
 # ================================================================================================ the work queue as a spreadsheet
 CSV_COLUMNS = ["reference", "use_case", "status", "recommendation", "priority", "queue", "due", "days_left", "assigned_to", "documents", "open_findings", "watchlist_matches", "integrity_alerts",
-               "created_at", "assessed_at", "decision", "decided_by", "decided_at"]
+               "created_at", "assessed_at", "decision", "decided_by", "decided_at", "model_calls", "tokens_in", "tokens_out", "cost"]
 
 
 def _cell(value: Any) -> Any:

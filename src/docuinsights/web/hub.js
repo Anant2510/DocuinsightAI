@@ -116,14 +116,15 @@
   function openSource(s) { if (!s.doc || s.doc === "case") return; S.view = "documents"; S.sel.doc = s.doc; S.sel.line = s.page ? { page: s.page, line: s.line } : null; render(); }
 
   // ---------------------------------------------------------------------------------------------- shell
-  const TOP = [["home", "Home"], ["cases", "Cases"], ["insights", "Insights"], ["knowledge", "Knowledge"], ["agents", "Agents"], ["platform", "How it is governed"]];
+  const TOP = [["home", "Home"], ["cases", "Cases"], ["insights", "Insights"], ["observability", "Observability"], ["knowledge", "Knowledge"], ["agents", "Agents"], ["platform", "How it is governed"]];
   const mapQuery = () => "open=" + S.k.open.join(",") + S.k.drill.map((d) => "&drill=" + encodeURIComponent(d)).join("");
   const top = (view) => run(async () => {   // a screen of the workspace (no case open): load what it shows, then draw it
     clearTimeout(S.timer); clearInterval(S.orch.timer); S.orch.playing = false; S.c = null; S.sel = {}; kHash(null); if (view !== "knowledge") S.k.back = null;
     if (view === "home" || view === "cases") S.cases = await api("cases");
     if (view === "knowledge") { S.k.ov = await api("knowledge"); S.k.m = await api("knowledge/map?" + mapQuery()); Object.assign(S.k, { e: null, grp: null, hits: null, tf: null, auto: true, focus: null, anchor: null, grew: null, reveal: null }); }
-    if (view === "platform") S.pf = await api("platform");
+    if (view === "platform") { S.pf = await api("platform"); S.sp = await api("spend"); }
     if (view === "insights") S.ins = await api("insights");
+    if (view === "observability") { S.ob = await api("observability"); S.sp = await api("spend"); }
     S.view = view; render(); window.scrollTo(0, 0);
   });
   function render() {
@@ -131,16 +132,16 @@
     const bar = h("header", { class: "top" },
       h("button", { class: "brand", onclick: top("home") }, h("img", { src: BASE + "/static/mark.svg", alt: "" }), h("b", null, S.cfg.product)),
       h("nav", { class: "tabs", "aria-label": "Workspace" }, TOP.map(([id, label]) => h("button", { "aria-current": String(!S.c && (S.view === id || (id === "cases" && S.view === "new"))), onclick: top(id) }, label))),
-      h("span", { class: "right" }), h("span", { class: "tag", title: "The model used for reading and narrative. Rules and the recommendation are code." }, S.cfg.model.offline ? "No model: patterns and rules" : "Model: " + S.cfg.model.model + (S.cfg.model.status ? " · " + S.cfg.model.status : "")),
+      h("span", { class: "right" }), h("span", { class: "tag ai" + (S.cfg.model.offline ? " off" : ""), title: S.cfg.model.offline ? "No model is connected: documents are read by patterns, and rules and the recommendation are code." : "A model is connected: it reads documents and writes narrative for the agents. Rules and the recommendation are code." }, h("i"), S.cfg.model.offline ? "AI offline" : "AI live"),
       h("span", { class: "tag" }, "Repository: " + S.cfg.repository.kind), S.cfg.links.portal ? h("a", { class: "tag", href: S.cfg.links.portal, style: "text-decoration:none" }, "CX Nova portal") : null,
       KEYED ? h("button", { class: "tag", style: "border:0;cursor:pointer", title: "The name the audit trail records for what you do here. It is a label, not a sign-in: the API key is the sign-in.", onclick: run(async () => {
         const v = await form("Your name, as the audit trail will record it", [{ k: "name", label: "Name", value: who() }], "Save"); if (!v) return;
         try { if (v.name.trim()) localStorage.setItem("docuinsights.user", v.name.trim().slice(0, 60)); else localStorage.removeItem("docuinsights.user"); } catch (e) { /* private window */ }
         S.cfg = await api("config"); render(); }) }, S.cfg.actor && S.cfg.actor !== "caseworker" ? S.cfg.actor : "Set your name") : null,
       h("span", { class: "tag demo" }, "Demonstration, synthetic data"));
-    const views = { home, cases, new: newCase, insights, agents, knowledge, platform, summary, documents, graph, evidence, consistency, assurance, reference, policy, provenance, whatif, monitor, decision, audit };
+    const views = { home, cases, new: newCase, insights, observability, agents, knowledge, platform, summary, documents, graph, evidence, consistency, assurance, reference, policy, provenance, whatif, monitor, decision, audit, spend: spendView };
     const main = h("main", { class: "main" + (S.view === "knowledge" && !S.c && S.k.view !== "manage" ? " full" : "") });
-    if (S.c && !a && !["monitor", "documents"].includes(S.view)) S.view = "monitor";
+    if (S.c && !a && !["monitor", "documents", "spend"].includes(S.view)) S.view = "monitor";
     add(main, (views[S.view] || home)());
     const shell = h("div", { class: "shell" + (S.c ? "" : " wide") }, S.c ? rail(running) : null, main);
     root.replaceChildren(...[bar, shell, S.c && a ? chat() : null].filter(Boolean));
@@ -162,7 +163,7 @@
       prof().reference_sources.length ? item("reference", "Classification assessment", n(count((f) => f.agent === "reference" && f.status === "review"), "warn")) : null,
       item("policy", "Policy and temporal checks", n(count((f) => f.agent === "policy" && st(f)), "bad")),
       h("h4", null, "Explain"), item("graph", "Entity relationship graph"), item("provenance", "Reasoning and provenance"), item("whatif", "Counterfactual simulator"),
-      h("h4", null, "Operate"), item("monitor", "Agent orchestration", running ? h("span", { class: "spin right" }) : null), item("decision", "Decision workspace", n(a && !S.c.decision ? 1 : 0, "warn")), item("audit", "Feedback and audit"));
+      h("h4", null, "Operate"), item("monitor", "Agent orchestration", running ? h("span", { class: "spin right" }) : null), item("spend", "Spend and model use", spendState() ? n("!", "warn") : null), item("decision", "Decision workspace", n(a && !S.c.decision ? 1 : 0, "warn")), item("audit", "Feedback and audit"));
   }
 
   const ASSURE = ["screening", "integrity", "privacy"];
@@ -233,12 +234,14 @@
         h("div", { class: "seg" }, [["urgency", "Most urgent first"], ["due", "Soonest due"], ["newest", "Newest"]].map(([k, l]) => h("button", { "aria-pressed": String(q.sort === k), onclick: () => { q.sort = k; render(); } }, l))),
         h("button", { class: "btn sm ghost", onclick: () => { q.show = "all"; render(); } }, "Show all " + S.cases.length),
         h("button", { class: "btn right", disabled: !S.cases.length, onclick: download("export/cases.csv", "docuinsights-cases.csv"), title: "The queue as a spreadsheet opens it" }, "Export as CSV")),
-      cardOf(null, rows.length ? h("table", null, h("thead", null, h("tr", null, ["Reference", "Use case", "Recommendation", "Priority", "Queue", "Due", "With", "Status"].map((x) => h("th", null, x)))),
+      cardOf(null, rows.length ? h("table", null, h("thead", null, h("tr", null, ["Reference", "Use case", "Recommendation", "Priority", "Queue", "Due", "With", "Spend", "Status"].map((x) => h("th", null, x)))),
         h("tbody", null, rows.map((c) => h("tr", { class: "click", onclick: run(() => open(c.reference)) }, h("td", { class: "mono" }, c.reference), h("td", null, (S.cfg.profiles.find((p) => p.id === c.profile) || {}).name || c.profile),
           h("td", null, outcomePill(c), c.watchlist_matches ? h("div", { class: "small", style: "color:var(--bad);margin-top:3px" }, c.watchlist_matches + " watchlist match" + (c.watchlist_matches > 1 ? "es" : "")) : null,
             c.integrity_alerts ? h("div", { class: "small", style: "color:var(--bad);margin-top:3px" }, c.integrity_alerts + " integrity alert" + (c.integrity_alerts > 1 ? "s" : "")) : null),
           h("td", null, c.priority ? pill(c.priority, cap(c.priority)) : h("span", { class: "muted" }, "–")), h("td", { class: "small" }, c.queue || "–"), h("td", null, dueText(c.due, c, !!c.decision)),
-          h("td", { class: "small" }, c.assigned_to || h("span", { class: "muted" }, "–")), h("td", { class: "small" }, c.state === "running" ? [h("span", { class: "spin" }), " assessing"] : c.status)))))
+          h("td", { class: "small" }, c.assigned_to || h("span", { class: "muted" }, "–")),
+          h("td", { class: "small mono", title: c.spend && c.spend.calls ? nCalls(c.spend.calls) + " model call(s)" : "Read and checked without a model" }, c.spend && c.spend.calls ? [tok(c.spend.input_tokens + c.spend.output_tokens), money({ ...c.spend, currency: c.currency }) ? h("div", { class: "muted", style: "font-family:var(--sans)" }, money({ ...c.spend, currency: c.currency })) : null] : h("span", { class: "muted" }, "–"), c.model_off ? h("div", { style: "color:var(--warn);font-family:var(--sans)" }, "model off") : null),
+          h("td", { class: "small" }, c.state === "running" ? [h("span", { class: "spin" }), " assessing"] : c.status)))))
         : h("p", { class: "muted" }, S.cases.length ? "No case in this view." : "No cases yet. Try a sample from the home page, or create a case with your own documents."))];
   }
   function newCase() {
@@ -300,7 +303,7 @@
             h("td", { style: "width:36%" }, h("div", { class: "stackbar", style: "height:10px", title: KEYS.map((k) => NAMES[k] + " " + u[k]).join(", ") }, KEYS.filter((k) => u[k]).map((k) => h("i", { style: "flex:" + u[k] + ";background:var(" + VAR[k] + ")" })))), h("td", { style: "font-weight:650" }, u.straight_through === null ? "–" : u.straight_through + "%")))))),
           cardOf("Screening, integrity and privacy", h("table", null, h("tbody", null, [["Names screened against the watchlists", d.assurance.names_screened], ["Possible watchlist matches", d.assurance.watchlist_matches + (d.assurance.watchlist_matches ? " (" + d.assurance.waiting + " waiting, " + d.assurance.cleared + " cleared, " + d.assurance.confirmed + " confirmed)" : "")],
               ["Integrity checks that need a person", d.assurance.integrity_alerts], ["Documents read", d.volume.documents + " (" + d.volume.pages + " pages, " + d.volume.values + " values lifted)"], ["Model calls", d.volume.model_calls]].map(([k, v]) => h("tr", null, h("td", null, k), h("td", { style: "text-align:right;font-weight:650" }, v))))),
-            d.assurance.personal_data.length ? [h("h3", { style: "margin:14px 0 4px" }, "Personal data found, by kind"), h("div", { class: "chips" }, d.assurance.personal_data.map((x) => h("span", { class: "chip", style: "cursor:default" }, x.kind + ": " + x.items)))] : null)))];
+            d.assurance.personal_data.length ? [h("h3", { style: "margin:14px 0 4px" }, "Personal data found, by kind"), h("div", { class: "chips" }, d.assurance.personal_data.map((x) => h("span", { class: "chip", style: "cursor:default" }, x.kind + ": " + x.items)))] : null))), spendCard(d.spend)];
   }
 
   function agents() {
@@ -802,7 +805,7 @@
           (S.cfg.watchlist_problems || []).length ? h("div", { class: "knote", style: "margin-top:8px" }, h("b", null, "Could not be read: "), S.cfg.watchlist_problems.join("; "), ". Every case says so as a finding until the list is fixed; a list that did not load is never read as no match.") : null,
           h("p", { class: "small muted", style: "margin-top:8px" }, "Name your own lists with DOCUINSIGHTS_WATCHLISTS (JSON or CSV files, or folders of them). The demonstration list is then no longer used.")),
         cardOf("Privacy and notifications", h("table", null, h("tbody", null, row("Personal data", "Found by document and by kind on every case, by fixed patterns"), row("Masked in", "The decision record on request, notifications, and the knowledge base (so its export carries no account number, email or telephone number)"),
-          row("Stored documents", "Kept as received: nothing is redacted in the original"), row("Notifications", S.cfg.webhook ? "A signed message to the address in DOCUINSIGHTS_WEBHOOK_URL when a case is assessed or decided" : "Off. Set DOCUINSIGHTS_WEBHOOK_URL to tell another system when a case is assessed or decided")))))];
+          row("Stored documents", "Kept as received: nothing is redacted in the original"), row("Notifications", S.cfg.webhook ? "A signed message to the address in DOCUINSIGHTS_WEBHOOK_URL when a case is assessed or decided" : "Off. Set DOCUINSIGHTS_WEBHOOK_URL to tell another system when a case is assessed or decided")))), spendSettingsCard())];
   }
 
   // ---------------------------------------------------------------------------------------------- findings
@@ -884,6 +887,135 @@
         cardOf("Personal data", pv ? [pv.categories.length ? h("table", null, h("thead", null, h("tr", null, ["Kind", "Items", "In"].map((x) => h("th", null, x)))), h("tbody", null, pv.categories.map((c) => h("tr", null, h("td", null, c.name), h("td", null, c.count),
             h("td", { class: "small" }, c.documents.map((id) => (S.c.documents.find((d) => d.id === id) || {}).name || id).join(", ")))))) : h("p", { class: "muted" }, "None found by the patterns. A pattern finds what is written in a recognisable form; it does not find a person described in free text."),
           h("p", { class: "small muted", style: "margin-top:8px" }, pv.masking), of("privacy").filter((f) => f.status !== "info").map((f) => h("div", { style: "margin-top:10px" }, findingCard(f, { review: true }))), h("div", { style: "margin-top:10px" }, recordButtons())] : h("p", { class: "muted" }, "Not checked.")))];
+  }
+
+
+  // ---------------------------------------------------------------------------------------------- spend: what a case costs, and the switches that stop it
+  const tok = (n) => Math.round(n || 0).toLocaleString("en-GB");
+  const nCalls = (n) => (Math.round((n || 0) * 10) / 10).toLocaleString("en-GB");
+  const amount = (x) => (x < 1 ? x.toFixed(4) : x.toLocaleString("en-GB", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  const money = (t) => (t && t.calls > (t.unpriced || 0) ? (t.currency || "USD") + " " + amount(t.cost) + ((t.listed || 0) > 0 ? " est." : "") : null);   // "est.": at the published list price, not a price stated here
+  const EST = "est. = estimated at the model's published list price. State your own rate under Observability to replace the estimate.";
+  const spentText = (t) => (t && t.calls ? tok((t.input_tokens || 0) + (t.output_tokens || 0)) + " tokens" + (money(t) ? " · " + money(t) : "") : "nothing");
+  const askWhy = (title, button) => form(title, [{ k: "note", label: "Why (kept in the audit trail)", type: "textarea" }], button);
+  const stopModel = run(async () => { const v = await askWhy("Stop model use for " + S.c.reference + ". The agents carry on with patterns and rules.", "Stop model use"); if (v) { setCase(await api("cases/" + S.c.reference + "/stop", { mode: "model", note: v.note })); toast("No further model call will be made for this case"); } });
+  const stopRun = run(async () => { const v = await askWhy("Stop the assessment of " + S.c.reference + ". Nothing of it is kept.", "Stop the assessment"); if (v) { setCase(await api("cases/" + S.c.reference + "/stop", { mode: "assessment", note: v.note })); toast("The assessment ends before its next agent"); } });
+  const resumeModel = run(async () => { setCase(await api("cases/" + S.c.reference + "/resume", {})); toast("This case may use the model again"); });
+  function spendState() {   // why the model is not being used for this case, if it is not: [status, words]
+    const sp = S.c.spend || {}, rq = S.c.stop_requested, lim = sp.limits || {};
+    if (rq && rq.mode === "assessment") return ["review", "Stopping: the assessment ends before its next agent"];
+    if (sp.model_off || (rq && rq.mode === "model")) return ["review", "Model use stopped for this case by " + ((sp.model_off || rq).by || "a caseworker")];
+    if (sp.paused) return ["review", "Model use is paused for the whole workspace by " + (sp.paused.by || "an administrator")];
+    if ((lim.reached || []).length) return ["fail", "Limit reached: " + lim.reached.join(" and ") + ". No further model call is made for this case"];
+    if ((lim.documents_at_limit || []).length) return ["review", lim.documents_at_limit.length + " document(s) reached the limit for one document"];
+    return null;
+  }
+  function spendStrip(full) {   // the case's spend in one line, with the switches: on the board while it runs, and at the top of the spend screen
+    const sp = S.c.spend || { totals: {} }, t = sp.totals || {}, lim = sp.limits || {}, st = spendState(), running = (S.c.progress || {}).state === "running", off = sp.model_off || (S.c.stop_requested && S.c.stop_requested.mode === "model");
+    const pctOf = lim.share ? Math.min(100, Math.round(lim.share * 100)) : 0;
+    return h("div", { class: "card spendstrip" },
+      h("div", { class: "sp-main" }, h("span", { class: "small muted" }, running ? "Spent so far" : "Spent on this case"), h("b", null, t.calls ? tok(t.tokens) + " tokens" : "Nothing"), money(t) ? h("b", { class: "cost" }, money(t)) : t.calls ? h("span", { class: "small muted" }, "no price set") : null,
+        h("span", { class: "small muted" }, nCalls(t.calls) + " model call(s)" + (t.failed ? ", " + nCalls(t.failed) + " failed" : "") + (money(t) && t.unpriced ? ", " + nCalls(t.unpriced) + " made before a price was set" : ""))),
+      lim.case_token_limit || lim.case_cost_limit ? h("div", { class: "sp-meter", title: "Against the limit for one case" }, h("span", { class: "tr" }, h("i", { class: pctOf >= 100 ? "full" : pctOf >= 80 ? "near" : "", style: "width:" + pctOf + "%" })),
+        h("span", { class: "small muted" }, pctOf + "% of " + (lim.case_token_limit ? tok(lim.case_token_limit) + " tokens" : "") + (lim.case_token_limit && lim.case_cost_limit ? " / " : "") + (lim.case_cost_limit ? (t.currency || "USD") + " " + lim.case_cost_limit : ""))) : null,
+      st ? h("div", { class: "sp-state" }, pill(st[0], st[0] === "fail" ? "stopped" : "held"), h("span", { class: "small" }, st[1])) : null,
+      h("div", { class: "row sp-act" }, running && !(S.c.stop_requested && S.c.stop_requested.mode === "assessment") ? h("button", { class: "btn sm danger", onclick: stopRun, title: "Ends the assessment before its next agent. Nothing of it is kept." }, "Stop the assessment") : null,
+        off ? (sp.model_off ? h("button", { class: "btn sm", onclick: resumeModel }, "Let it use the model again") : null) : h("button", { class: "btn sm" + (running ? " danger" : ""), onclick: stopModel, title: "No further model call for this case. The agents carry on with patterns and rules." }, "Stop model use"),
+        full ? null : h("button", { class: "btn sm ghost", onclick: go("spend") }, "Where it went")));
+  }
+  function spendView() {
+    const sp = S.c.spend || { totals: {}, documents: [], agents: [], activities: [], log: [] }, t = sp.totals || {}, lim = sp.limits || {}, top = Math.max(1, ...sp.documents.map((d) => d.tokens));
+    const tile = (v, l) => h("div", { class: "tile" }, h("b", null, v), h("span", null, l));
+    const table = (head, rows, cells) => h("table", null, h("thead", null, h("tr", null, head.map((x, i) => h("th", { style: i ? "text-align:right" : null }, x)))), h("tbody", null, rows.map((r) => h("tr", null, cells(r).map((c, i) => h("td", { class: i ? "mono small" : null, style: i ? "text-align:right" : null }, c))))));
+    const cost = (r) => money({ ...r, currency: t.currency }) || "–";
+    return [section("Spend and model use", "Every model call made for this case, counted where it is made: by document, by agent and by kind of work. Rules, checks and the recommendation are code and cost nothing. Stop model use at any time: the agents carry on with the use case's patterns."),
+      h("div", { class: "stack" }, spendStrip(true),
+        h("div", { class: "grid g4" }, tile(nCalls(t.calls), "model calls"), tile(tok(t.input_tokens), "tokens in"), tile(tok(t.output_tokens), "tokens out"), tile(money(t) || "–", money(t) ? (t.listed ? "cost, estimated at list price" : "cost at the price set") : "cost: no price for this model")),
+        cardOf("By document", sp.documents.length ? [h("p", { class: "small muted", style: "margin-bottom:8px" }, "Reading a scan and lifting the fields are one request for each document. Naming the documents is one request for the whole batch, shared out evenly between them" + (lim.doc_token_limit ? ". One document may use " + tok(lim.doc_token_limit) + " tokens." : ".")),
+          sp.documents.map((d) => h("div", { class: "hbar", title: d.name + ": " + tok(d.input_tokens) + " in, " + tok(d.output_tokens) + " out" }, h("span", { class: "nm" }, d.name, (lim.documents_at_limit || []).includes(d.id) ? h("small", { style: "color:var(--bad)" }, "at its limit") : null,
+            h("small", null, [d.own ? d.own + (d.own === 1 ? " request" : " requests") + " of its own" : "", d.shared ? "one of a batch in " + d.shared : ""].filter(Boolean).join(", ") + (cost(d) !== "–" ? " · " + cost(d) : ""))), h("span", { class: "tr" }, h("i", { style: "width:" + Math.max(2, Math.round((d.tokens / top) * 100)) + "%" })), h("b", null, tok(d.tokens))))]
+          : h("p", { class: "muted" }, t.calls ? "The calls made for this case were about the case as a whole, not one document." : "No model call was made for a document of this case: it was read and checked by patterns and rules.")),
+        h("div", { class: "grid g2" },
+          cardOf("By agent", sp.agents.length ? table(["Agent", "Calls", "Tokens in", "Tokens out", "Cost"], sp.agents, (r) => [(S.cfg.agents.find((a) => a.id === r.id) || {}).name || r.id, nCalls(r.calls), tok(r.input_tokens), tok(r.output_tokens), cost(r)]) : h("p", { class: "muted" }, "No agent called a model.")),
+          cardOf("By kind of work", sp.activities.length ? table(["Work", "Calls", "Tokens", "Cost"], sp.activities, (r) => [r.name, nCalls(r.calls), tok(r.tokens), cost(r)]) : h("p", { class: "muted" }, "Nothing yet."),
+            h("p", { class: "small muted", style: "margin-top:8px" }, "An assessment of documents that have not changed reads nothing again, so it costs nothing more."))),
+        sp.log.length ? h("details", { class: "card" }, h("summary", null, "The last " + sp.log.length + " model call(s)"), h("table", { style: "margin-top:8px" }, h("thead", null, h("tr", null, ["When", "Agent", "Step", "About", "Model", "In", "Out", "Cost", "Took"].map((x) => h("th", null, x)))),
+          h("tbody", null, sp.log.map((c) => h("tr", null, h("td", { class: "small muted" }, when(c.at)), h("td", { class: "small" }, (S.cfg.agents.find((a) => a.id === c.agent) || {}).name || c.agent), h("td", { class: "small mono" }, c.step), h("td", { class: "small" }, (c.doc_names || []).length > 2 ? c.doc_names.length + " documents" : (c.doc_names || []).join(", ") || "the case"),
+            h("td", { class: "small mono" }, c.model), h("td", { class: "mono small" }, tok(c.input_tokens)), h("td", { class: "mono small" }, tok(c.output_tokens)), h("td", { class: "mono small" }, c.cost === null || c.cost === undefined ? "–" : c.cost.toFixed(4)), h("td", { class: "mono small" }, c.error ? h("span", { style: "color:var(--bad)" }, c.error) : c.ms + " ms")))))) : null,
+        h("p", { class: "small muted" }, (t.listed ? EST + " " : "") + "Prices and limits are set for the whole workspace under Observability. A limit holds a call back before it is sent; a call already sent when a stop arrives finishes and is counted."))];
+  }
+
+  function observability() {   // what the agents did and what it cost, for the whole workspace
+    const o = S.ob; if (!o) return [section("Observability", "What the agents did and what it cost."), h("p", { class: "muted" }, "Loading…")];
+    const cur = o.settings.currency || "USD", t = { ...o.totals, currency: cur }, m = (r) => money({ ...r, currency: cur }) || "–", day = (d) => new Date(d + "T00:00:00Z").toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: "UTC" });
+    const tile = (v, l, sub) => h("div", { class: "tile" }, h("b", null, v), h("span", null, l), sub ? h("small", { class: "muted" }, sub) : null);
+    const th = (xs, right) => h("thead", null, h("tr", null, xs.map((x, i) => h("th", { style: i >= right ? "text-align:right" : null }, x)))), num = (v) => h("td", { class: "mono small", style: "text-align:right" }, v);
+    const topDay = Math.max(1, ...o.by_day.map((d) => d.tokens)), topAgent = Math.max(1, ...o.by_agent.map((a) => a.tokens)), topDoc = Math.max(1, ...o.by_document.map((d) => d.tokens)), reasons = Object.entries(o.held.reasons || {});
+    const none = !o.totals.calls;
+    return [section("Observability", "What the agents did and what it cost: every model call counted against its case, by day, agent, case and document, with the time it took, what failed and what was held back. Rules, checks and the recommendation are code and cost nothing."),
+      h("div", { class: "viz stack" },
+        h("div", { class: "grid g4" }, tile(m(t), "token cost" + (t.listed ? ", estimated at list price" : ""), o.cases_with_spend ? m({ calls: 1, cost: o.average_cost, listed: t.listed }) + " a case on average" : null), tile(tok(t.tokens), "tokens", tok(t.input_tokens) + " in · " + tok(t.output_tokens) + " out"),
+          tile(nCalls(t.calls), "model calls", o.cases_with_spend + " of " + o.cases + " case(s) used the model"), tile(t.calls ? (t.average_ms >= 1000 ? (t.average_ms / 1000).toFixed(1) + " s" : t.average_ms + " ms") : "–", "average time for a call", nCalls(t.failed) + " failed · " + nCalls(o.held.calls) + " held back")),
+        none ? h("div", { class: "card" }, h("b", null, o.model.connected ? "No model call has been made in this workspace yet." : "AI is offline, so nothing has been spent."), h("p", { class: "small muted", style: "margin-top:4px" }, o.model.connected ? "Assess a case and its calls, tokens and cost appear here as they are made." : "Documents are read by patterns, and rules and the recommendation are code. Connect a model and every call it makes is counted here.")) : null,
+        t.listed ? h("p", { class: "small muted" }, EST) : null,
+        h("div", { class: "grid g2" },
+          cardOf("Tokens and cost by day, last " + o.by_day.length + " days", h("div", { class: "cols", role: "img", "aria-label": "Tokens used per day" }, o.by_day.map((d, i) => h("div", { class: "col", "data-tip": day(d.day) + ": " + tok(d.tokens) + " tokens · " + m(d) + " · " + nCalls(d.calls) + " call(s)" },
+            h("i", { style: "height:" + (d.tokens / topDay) * 100 + "%;background:var(--v-ink)" }), d.tokens && (d.tokens === topDay || i === o.by_day.length - 1) ? h("span", { class: "n", style: "top:auto;bottom:calc(" + (d.tokens / topDay) * 100 + "% + 3px)" }, tok(d.tokens)) : null))),
+            h("div", { class: "row small muted", style: "justify-content:space-between;margin-top:4px" }, h("span", null, day(o.by_day[0].day)), h("span", null, day(o.by_day[o.by_day.length - 1].day)))),
+          cardOf("By agent", o.by_agent.length ? o.by_agent.map((a) => h("div", { class: "hbar", title: a.name + ": " + tok(a.input_tokens) + " in, " + tok(a.output_tokens) + " out" }, h("span", { class: "nm" }, a.name, h("small", null, nCalls(a.calls) + " call(s) · " + m(a) + (a.average_ms ? " · " + a.average_ms + " ms each" : "") + (a.failed ? " · " + nCalls(a.failed) + " failed" : ""))),
+            h("span", { class: "tr" }, h("i", { style: "width:" + Math.max(2, Math.round((a.tokens / topAgent) * 100)) + "%" })), h("b", null, tok(a.tokens)))) : h("p", { class: "muted" }, "No agent has called a model."),
+            h("p", { class: "small muted", style: "margin-top:8px" }, "Only the agents that read and write use a model. The others are code."))),
+        cardOf("Token cost by case", o.by_case.length ? h("table", null, th(["Case", "Use case", "Documents", "Model calls", "Tokens in", "Tokens out", "Token cost", "Tokens a document"], 2),
+          h("tbody", null, o.by_case.map((r) => h("tr", { class: "click", onclick: run(() => open(r.reference, "spend")) }, h("td", { class: "mono" }, r.reference, r.model_off ? h("span", { class: "pill review", style: "margin-left:6px" }, "model off") : null), h("td", { class: "small" }, (S.cfg.profiles.find((p) => p.id === r.profile) || {}).name || r.profile),
+            num(r.documents), num(nCalls(r.calls)), num(tok(r.input_tokens)), num(tok(r.output_tokens)), h("td", { class: "mono", style: "text-align:right;font-weight:600" }, m(r)), num(tok(r.per_document)))))) : h("p", { class: "muted" }, "No case has used the model."),
+          o.by_case.length ? h("p", { class: "small muted", style: "margin-top:8px" }, "Most expensive first. Open a case to see where its tokens went, document by document, and to stop its model use.") : null),
+        h("div", { class: "grid g2" },
+          cardOf("Documents that cost the most", o.by_document.length ? o.by_document.slice(0, 8).map((d) => h("div", { class: "hbar click", onclick: run(() => open(d.reference, "spend")), title: "Open " + d.reference }, h("span", { class: "nm" }, d.name, h("small", null, d.reference + " · " + m(d))),
+            h("span", { class: "tr" }, h("i", { style: "width:" + Math.max(2, Math.round((d.tokens / topDoc) * 100)) + "%" })), h("b", null, tok(d.tokens)))) : h("p", { class: "muted" }, "No document has been read by the model.")),
+          cardOf("Held back and stopped", h("table", null, h("tbody", null, h("tr", null, h("td", { class: "small muted", style: "width:60%" }, "Model calls held back before they were sent"), h("td", { class: "mono" }, nCalls(o.held.calls))),
+            reasons.map(([k, v]) => h("tr", null, h("td", { class: "small muted", style: "padding-left:22px" }, "by " + k), h("td", { class: "mono small" }, v + " run(s)"))),
+            h("tr", null, h("td", { class: "small muted" }, "Cases where a person stopped model use"), h("td", { class: "mono" }, o.held.model_stops)), h("tr", null, h("td", { class: "small muted" }, "Assessments a person stopped"), h("td", { class: "mono" }, o.held.assessments_stopped)),
+            h("tr", null, h("td", { class: "small muted" }, "Model calls that failed"), h("td", { class: "mono" }, nCalls(t.failed))))),
+            h("p", { class: "small muted", style: "margin-top:8px" }, "A call that is held back is not an error: the agent falls back to the use case's patterns and its run says why."))),
+        cardOf("Agents under the harness", o.harness.length ? h("table", null, th(["Agent", "Runs", "Contracts kept", "Average time", "Model calls", "Calls held back", "Fell back to patterns", "Failed"], 1),
+          h("tbody", null, o.harness.map((r) => h("tr", null, h("td", null, r.name), num(r.runs), h("td", { class: "mono small", style: "text-align:right" + (r.kept < r.runs ? ";color:var(--bad)" : "") }, r.kept + " of " + r.runs), num(r.average_ms >= 1000 ? (r.average_ms / 1000).toFixed(1) + " s" : r.average_ms + " ms"), num(r.model_calls), num(r.held), num(r.fell_back), h("td", { class: "mono small", style: "text-align:right" + (r.failed ? ";color:var(--bad)" : "") }, r.failed)))))
+          : h("p", { class: "muted" }, "No case has been assessed."), h("p", { class: "small muted", style: "margin-top:8px" }, "From each case's latest assessment. Every run of every agent is also a line in the provenance ledger.")),
+        o.calls.length ? cardOf("Latest model calls", h("table", null, th(["When", "Case", "Agent", "Step", "About", "Tokens in", "Tokens out", "Cost", "Took"], 5),
+          h("tbody", null, o.calls.map((c) => h("tr", { class: "click", onclick: run(() => open(c.reference, "spend")) }, h("td", { class: "small muted" }, when(c.at)), h("td", { class: "mono small" }, c.reference), h("td", { class: "small" }, (S.cfg.agents.find((a) => a.id === c.agent) || {}).name || c.agent), h("td", { class: "small mono" }, c.step),
+            h("td", { class: "small" }, (c.doc_names || []).length > 2 ? c.doc_names.length + " documents" : (c.doc_names || []).join(", ") || "the case"), num(tok(c.input_tokens)), num(tok(c.output_tokens)), num(c.cost === null || c.cost === undefined ? "–" : amount(c.cost)),
+            h("td", { class: "mono small", style: "text-align:right" }, c.error ? h("span", { style: "color:var(--bad)" }, c.error) : c.ms + " ms")))))) : null,
+        h("div", { class: "grid g2" }, spendSettingsCard(), cardOf("What is counted, and how", h("ul", { class: "small", style: "margin:0;padding-left:18px;display:grid;gap:6px" },
+          h("li", null, "Every model call, where it is made: tokens in and out as the model reports them. Nothing is sampled."), h("li", null, "Money is tokens times a price: the one stated here, or until then the model's published list price, marked est. It is not read from your provider's invoice."),
+          h("li", null, "A limit, a person's stop and a pause are checked before a call is sent. A call already sent finishes and is counted."), h("li", null, "The same figures are served to other systems at /api/v1/observability, and each case's at /api/v1/cases/{reference}/spend.")))))];
+  }
+
+  function spendCard(sp) {   // the workspace's spend on the Insights screen
+    if (!sp) return null;
+    const t = { ...sp.totals, currency: sp.settings.currency }, top = Math.max(1, ...sp.by_profile.map((r) => r.tokens)), name = (id) => (S.cfg.profiles.find((p) => p.id === id) || {}).name || id;
+    return h("div", { class: "grid g2", style: "margin-top:16px" },
+      cardOf("What the model has cost", h("div", { class: "row", style: "gap:26px;align-items:flex-end;margin-bottom:10px" }, h("div", { class: "stat", style: "padding:0" }, h("b", null, tok(t.tokens)), h("span", null, "tokens across " + sp.cases_with_spend + " of " + sp.cases + " case(s)")),
+          h("div", { class: "stat", style: "padding:0" }, h("b", null, money(t) || "–"), h("span", null, money(t) ? "at the price set" : "no price is set"))),
+        h("p", { class: "small muted", style: "margin-bottom:6px" }, sp.cases_with_spend ? "A case that used the model took " + tok(sp.average_tokens) + " tokens on average" + (money(t) ? " (" + (t.currency || "USD") + " " + sp.average_cost.toFixed(4) + ")" : "") + ". Cases read by patterns alone cost nothing." + (money(t) && t.unpriced ? " " + nCalls(t.unpriced) + " call(s) were made before a price was set: they are counted in tokens, not in money." : "") : "No case in this workspace has used a model yet."),
+        sp.by_profile.filter((r) => r.tokens).map((r) => h("div", { class: "hbar" }, h("span", { class: "nm" }, r.name || name(r.profile), h("small", null, r.cases + " case(s)")), h("span", { class: "tr" }, h("i", { style: "width:" + Math.max(2, Math.round((r.tokens / top) * 100)) + "%" })), h("b", null, tok(r.tokens)))),
+        sp.settings.paused ? h("div", { class: "knote" }, "Model use is paused for this workspace by " + (sp.settings.paused.by || "an administrator") + ".") : null),
+      cardOf("Cases that cost the most", sp.top.length ? h("table", null, h("thead", null, h("tr", null, ["Case", "Use case", "Calls", "Tokens", "Cost"].map((x, i) => h("th", { style: i > 1 ? "text-align:right" : null }, x)))),
+        h("tbody", null, sp.top.map((r) => h("tr", { class: "click", onclick: run(() => open(r.reference, "spend")) }, h("td", { class: "mono" }, r.reference, r.model_off ? h("span", { class: "pill review", style: "margin-left:6px" }, "model off") : null), h("td", { class: "small" }, name(r.profile)),
+          h("td", { class: "mono small", style: "text-align:right" }, nCalls(r.calls)), h("td", { class: "mono small", style: "text-align:right" }, tok(r.tokens)), h("td", { class: "mono small", style: "text-align:right" }, money({ ...r, currency: sp.settings.currency }) || "–")))))
+        : h("p", { class: "muted" }, "Nothing has been spent.")));
+  }
+  function spendSettingsCard() {   // prices, limits and the pause, on How it is governed
+    const sp = S.sp; if (!sp) return null;
+    const st = sp.settings, row = (k, v) => h("tr", null, h("td", { class: "small muted", style: "width:42%" }, k), h("td", null, v)), own = (k) => (st.changed.includes(k) ? h("span", { class: "small muted" }, " · set here") : null);
+    const edit = run(async () => { const v = await form("Prices and limits for this workspace", [{ k: "price_input", label: "Price for a million tokens in (your contracted rate)", value: String(st.price_input || "") }, { k: "price_output", label: "Price for a million tokens out", value: String(st.price_output || "") }, { k: "currency", label: "Currency code", value: st.currency },
+      { k: "case_token_limit", label: "Tokens one case may use (0: no limit)", value: String(st.case_token_limit || "") }, { k: "case_cost_limit", label: "Money one case may cost (0: no limit)", value: String(st.case_cost_limit || "") }, { k: "doc_token_limit", label: "Tokens one document may use (0: no limit)", value: String(st.doc_token_limit || "") }], "Save");
+      if (v) { S.sp = await api("spend", Object.fromEntries(Object.entries(v).map(([k, x]) => [k, String(x).trim() === "" ? (k === "currency" ? "" : null) : k === "currency" ? x : Number(x)]))); if (S.view === "observability") S.ob = await api("observability"); render(); toast("Saved. It applies to the next model call."); } });
+    const pause = (on) => run(async () => { const v = on ? await askWhy("Pause model use for the whole workspace. Every agent runs on patterns and rules until it is resumed.", "Pause model use") : {}; if (v) { S.sp = await api("spend", { paused: on, note: v.note || "" }); if (S.view === "observability") S.ob = await api("observability"); render(); toast(on ? "Model use is paused" : "Model use is back on"); } });
+    return cardOf("Spend and limits", h("p", { class: "small muted", style: "margin-bottom:8px" }, "Every model call is counted against its case. A limit holds a call back before it is sent; the agent then falls back to the use case's patterns and its run says why."),
+      h("table", null, h("tbody", null, row("Price", st.priced ? [st.currency + " " + st.price_input + " in / " + st.price_output + " out, for a million tokens", own("price_input")]
+          : st.estimates ? "None stated: costed at the connected model's published list price (as of " + st.list_prices_as_of + ") and marked est. State your contracted rate to replace it." : "Not set: spend is shown in tokens only"),
+        row("One case may use", [st.case_token_limit ? tok(st.case_token_limit) + " tokens" : "no token limit", st.case_cost_limit ? " · " + st.currency + " " + st.case_cost_limit : "", own("case_token_limit")]), row("One document may use", [st.doc_token_limit ? tok(st.doc_token_limit) + " tokens" : "no limit", own("doc_token_limit")]),
+        row("Spent so far", spentText({ ...sp.totals, currency: st.currency }) + " across " + sp.cases_with_spend + " case(s)"), row("Model use", st.paused ? [pill("review", "paused"), " by " + (st.paused.by || "an administrator") + (st.paused.note ? ": " + st.paused.note : "")] : pill("pass", "on")))),
+      h("div", { class: "row", style: "margin-top:10px" }, h("button", { class: "btn sm", onclick: edit }, "Change prices and limits"), st.paused ? h("button", { class: "btn sm primary", onclick: pause(false) }, "Resume model use") : h("button", { class: "btn sm danger", onclick: pause(true) }, "Pause model use for the workspace")));
   }
 
   // ---------------------------------------------------------------------------------------------- case views
@@ -1007,6 +1139,7 @@
   }
   function orchStatus(o) {
     if (o.pr.state === "failed" && !o.replay) return "Stopped at " + o.pr.stage + ": " + (o.pr.error || "");
+    if (o.pr.state === "stopped" && !o.replay && !o.a) return "Stopped by a person after " + (o.pr.done || []).length + " of " + S.cfg.stages.length + " agents. Nothing of it was kept.";
     if (o.replay) return "Replay · beat " + (o.t + 1) + " of " + o.total + " · " + (o.now ? o.now.name + ": " + o.now.summary : o.t === o.runs.length ? "The boss agent hands the case to a person" : "A person decides; the workspace learns the outcome");
     if (o.running) { const ag = S.cfg.agents.find((x) => x.stage === o.pr.stage); return "Live · " + (ag ? ag.name + " is working" : "starting") + " · " + o.runs.length + " of " + S.cfg.stages.length + " agent runs done"; }
     if (!o.a) return "Not assessed yet. Assess the case to watch the agents work.";
@@ -1147,10 +1280,12 @@
     const runs = pr.state === "running" ? live.runs : a ? a.runs : [];
     return [section("Agent orchestration", "Watch the case move. The boss agent plans each step, the harness runs each agent under its contract, and every agent works from the same knowledge graph and the same shared memory. Play it back, or click any part for its detail."),
       pr.state === "failed" ? h("div", { class: "banner review", style: "margin-bottom:14px" }, h("b", null, "The assessment stopped at " + pr.stage), h("p", null, pr.error)) : null,
+      pr.state === "stopped" ? h("div", { class: "banner review", style: "margin-bottom:14px" }, h("b", null, "The assessment was stopped"), h("p", null, pr.error), h("div", { style: "margin-top:8px" }, h("button", { class: "btn sm primary", onclick: run(async () => setCase(await api("cases/" + S.c.reference + "/assess", {}))) }, "Assess the case again"))) : null,
+      (S.c.spend && (S.c.spend.totals.calls || pr.state === "running" || spendState())) ? h("div", { style: "margin-bottom:14px" }, spendStrip()) : null,
       orchestration(), h("div", { style: "height:16px" }),
-      cardOf("Agent runs", runs.length ? h("table", null, h("thead", null, h("tr", null, ["Run", "Agent", "Status", "Contract", "Time", "Model", "Prompt", "Tool calls", "Graph writes", "Tokens in / out"].map((x) => h("th", null, x)))), h("tbody", null, runs.map((r) => h("tr", null, h("td", { class: "mono small" }, r.id), h("td", null, h("b", null, r.name), h("div", { class: "small muted" }, r.summary)), h("td", null, pill(r.status === "ok" ? "pass" : r.status === "failed" ? "fail" : "review", r.status), (r.notes || []).map((n) => h("div", { class: "small muted" }, n))),
+      cardOf("Agent runs", runs.length ? h("table", null, h("thead", null, h("tr", null, ["Run", "Agent", "Status", "Contract", "Time", "Model", "Prompt", "Tool calls", "Graph writes", "Tokens in / out", "Cost"].map((x) => h("th", null, x)))), h("tbody", null, runs.map((r) => h("tr", null, h("td", { class: "mono small" }, r.id), h("td", null, h("b", null, r.name), h("div", { class: "small muted" }, r.summary)), h("td", null, pill(r.status === "ok" ? "pass" : r.status === "failed" ? "fail" : "review", r.status), (r.notes || []).map((n) => h("div", { class: "small muted" }, n))),
         h("td", null, r.contract ? [pill(r.contract.kept ? "pass" : "fail", r.contract.kept ? "kept" : "not kept"), h("div", { class: "small muted" }, r.contract.promises.length + " promise(s) checked" + (r.memory && r.memory.reads.length ? " · read " + r.memory.reads.join(", ") : "") + (r.throttle && r.throttle.waited_ms ? " · waited " + r.throttle.waited_ms + " ms" : "")), (r.contract.broken || []).map((b) => h("div", { class: "small", style: "color:var(--bad)" }, b))] : "–"),
-        h("td", { class: "mono small" }, r.duration_ms + " ms"), h("td", { class: "small" }, r.model), h("td", { class: "small mono" }, r.prompt_version || "–"), h("td", { class: "small" }, (r.tool_calls || []).map((t) => h("div", null, t.tool + " · " + t.status)), !(r.tool_calls || []).length ? "–" : null), h("td", { class: "small mono" }, "+" + r.graph_writes.nodes + " / +" + r.graph_writes.edges), h("td", { class: "small mono" }, r.input_tokens + " / " + r.output_tokens))))) : h("p", { class: "muted" }, "No run yet.")),
+        h("td", { class: "mono small" }, r.duration_ms + " ms"), h("td", { class: "small" }, r.model), h("td", { class: "small mono" }, r.prompt_version || "–"), h("td", { class: "small" }, (r.tool_calls || []).map((t) => h("div", null, t.tool + " · " + t.status)), !(r.tool_calls || []).length ? "–" : null), h("td", { class: "small mono" }, "+" + r.graph_writes.nodes + " / +" + r.graph_writes.edges), h("td", { class: "small mono" }, r.input_tokens + " / " + r.output_tokens), h("td", { class: "small mono" }, r.cost === null || r.cost === undefined ? "–" : amount(r.cost)))))) : h("p", { class: "muted" }, "No run yet.")),
       a ? h("p", { class: "small muted", style: "margin-top:10px" }, "End to end: " + a.metrics.duration_ms + " ms · " + a.metrics.model_calls + " model call(s) · " + a.metrics.rules + " rule(s) · " + a.metrics.pages + " page(s) · reads: " + a.model.provider + ".") : null,
       a && a.memory ? h("details", { class: "card", style: "margin-top:12px" }, h("summary", null, "Working memory: the note each agent left for the next (" + a.memory.working.length + ")"), h("table", { style: "margin-top:8px" }, h("tbody", null, a.memory.working.map((n) => h("tr", null, h("td", { class: "small mono", style: "width:150px" }, n.by), h("td", { class: "small" }, n.value)))))) : null,
       a ? h("details", { class: "card", style: "margin-top:12px", ontoggle: run(async (ev) => { if (ev.target.open && !S.sel.ledger) { S.sel.ledger = await api("ledger?limit=200&case=" + encodeURIComponent(S.c.reference)); render(); } }), open: !!S.sel.ledger }, h("summary", null, "Provenance ledger: every action on this case, chained"),

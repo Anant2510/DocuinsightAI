@@ -14,7 +14,7 @@ import time
 from datetime import date
 from typing import Any, Callable
 
-from . import assurance, checks, contracts as C, graphs, harness as H, reader, understand
+from . import assurance, checks, contracts as C, graphs, harness as H, reader, spend as S, understand
 from .casefile import current, event, finding, live_docs, now
 from .model import PROMPT_VERSION, OfflineModel
 from .profiles import Profile
@@ -46,6 +46,10 @@ AGENTS: list[dict[str, Any]] = [
 AGENT_OF = {a["stage"]: a for a in AGENTS if a["stage"]}
 
 
+class Stopped(RuntimeError):
+    """A person stopped this assessment. Nothing of it is kept; what it spent stays counted."""
+
+
 class Tools:
     """What a stage may use. A host fills in its own model, its own way of reading a stored file, and its own HTTP for references.
     The foundation is optional and passed the same way: the rate limiter the model calls share, the provenance ledger, the workspace's
@@ -55,7 +59,9 @@ class Tools:
                  fetch: Any = None, progress: Callable[[dict[str, Any]], None] | None = None, sidecar: Callable[[dict[str, Any], dict[str, Any]], str | None] | None = None,
                  limiter: Any = None, ledger: Any = None, episodes: Any = None, on_finish: Callable[[dict[str, Any]], None] | None = None,
                  ground: Callable[..., dict[str, Any] | None] | None = None, today: Callable[[], date] | None = None,
-                 watchlists: Callable[[], list[dict[str, Any]]] | None = None) -> None:
+                 watchlists: Callable[[], list[dict[str, Any]]] | None = None, gate: Callable[[dict[str, Any], list[str], int], None] | None = None,
+                 spend: Callable[[dict[str, Any], str, list[dict[str, Any]], list[str]], None] | None = None,
+                 stopped: Callable[[dict[str, Any]], str | None] | None = None, price: Callable[[dict[str, Any]], float | None] | None = None) -> None:
         self.model = model or OfflineModel()
         self.read_bytes = read_bytes
         self.overlay = overlay or {}
@@ -69,6 +75,10 @@ class Tools:
         self.ground = ground      # the host's knowledge graph: the nodes an agent's contract says it is handed before it starts
         self.today = today or date.today          # the day triage and the date checks count from (a test sets its own)
         self.watchlists = watchlists              # the lists the screening agent reads; none given: the installation's, else the demonstration list
+        self.gate = gate          # may a model call be made for this case now: raises Throttled with the reason (a limit, a person's stop, a pause)
+        self.spend = spend        # where the model calls an agent made for a case are counted
+        self.stopped = stopped    # the reason a person stopped this assessment, or None: asked before every stage
+        self.price = price        # what one model call cost at the price in force, or None when there is no price for it
         self.memory: Any = None   # the memory handle of the agent that is running; set by the harness
         self.grounding: Any = None   # what the harness handed the agent that is running
 
@@ -76,7 +86,8 @@ class Tools:
 def begin(case: dict[str, Any], *, trigger: str = "assessment", by: str = "system") -> dict[str, Any]:
     n = len(case.get("history") or []) + (1 if case.get("assessment") else 0) + 1
     case["working"] = {"id": f"A{n}", "at": now(), "trigger": trigger, "by": by, "done": [], "stages": {}, "runs": [], "findings": [], "entities": [], "unresolved": [],
-                       "graph": {"nodes": [], "edges": []}, "references": [], "memory": [], "recall": None, "privacy": None, "screening": None, "triage": None}
+                       "graph": {"nodes": [], "edges": []}, "references": [], "memory": [], "recall": None, "privacy": None, "screening": None, "triage": None,
+                       "spend0": S.totals(case)}   # what the case had spent before this assessment began
     case["progress"] = {"state": "running", "stage": "", "done": []}
     return case["working"]
 
@@ -91,6 +102,7 @@ def _intake(case: dict[str, Any], profile: Profile, tools: Tools, w: dict[str, A
         if "text" not in ver:
             data = tools.read_bytes(d, ver) if tools.read_bytes else b""
             ver["checks"] = reader.check_file(d["name"], data)
+            getattr(tools.model, "about", lambda docs: None)([d["id"]])
             got = reader.read(d["name"], data, model=tools.model, sidecar=tools.sidecar(d, ver) if tools.sidecar else None)
             ver.update(pages=got["pages"], text=got["text"], method=got["method"], note=got["note"])
         rows.append({"doc": d["id"], "name": d["name"], "version": d["current"], "sha256": ver.get("sha256", "")[:16], "method": ver.get("method"), "pages": len(ver.get("pages") or []),
@@ -218,6 +230,9 @@ def step(case: dict[str, Any], profile: Profile, tools: Tools, stage: str) -> di
             step(case, profile, tools, earlier)
     agent = AGENT_OF[stage]
     contract = C.get(agent["id"])
+    why = tools.stopped(case) if tools.stopped else None
+    if why:   # asked before every stage: a stop takes effect between two agents, and at once for the model (the gate refuses the next call)
+        raise Stopped(why)
     calls0 = len(getattr(tools.model, "calls", []))
     case["progress"] = {"state": "running", "stage": stage, "done": list(w["done"])}
     if tools.progress:
@@ -244,6 +259,8 @@ def step(case: dict[str, Any], profile: Profile, tools: Tools, stage: str) -> di
             trace["contract"].setdefault("broken", []).append(f"did not complete: {run['error']}")
             trace["contract"]["kept"] = False
     calls = list(getattr(tools.model, "calls", []))[calls0:]
+    costs = [tools.price(c) for c in calls] if tools.price else []
+    run["cost"] = round(sum(x for x in costs if x is not None), 6) if any(x is not None for x in costs) else None   # None: no model call, or no price for it
     run.update(duration_ms=round((time.perf_counter() - t0) * 1000, 1), summary=out.get("summary", ""), retries=max(0, trace.get("attempts", 1) - 1),
                model=", ".join(sorted({c["model"] for c in calls})) if calls else "none (code)", prompt_version=PROMPT_VERSION if calls else None,
                model_calls=len(calls), input_tokens=sum(c.get("input_tokens", 0) for c in calls), output_tokens=sum(c.get("output_tokens", 0) for c in calls),
@@ -253,7 +270,8 @@ def step(case: dict[str, Any], profile: Profile, tools: Tools, stage: str) -> di
                sections=trace.get("sections"), grounding=trace.get("grounding"))
     run["plan"]["done"] = len(tasks) if run["status"] != "failed" else 0
     if (trace.get("throttle") or {}).get("shed"):
-        run["notes"] = run["notes"] + [f"{trace['throttle']['shed']} model call(s) were not made: the rate limit or this agent's budget was reached"]
+        why = (trace["throttle"].get("why") or ["the rate limit or this agent's budget was reached"])
+        run["notes"] = run["notes"] + [f"{trace['throttle']['shed']} model call(s) were not made: " + "; ".join(why[:3])]
     if run["status"] != "failed" and run["notes"]:
         run["status"] = "degraded"
     w["memory"].append({"key": f"{stage}.summary", "value": run["summary"], "by": agent["id"], "at": now()})   # the note this agent leaves for the next ones
@@ -298,7 +316,7 @@ def _finish(case: dict[str, Any], profile: Profile, tools: Tools, w: dict[str, A
     assessment["metrics"] = {"duration_ms": round(sum(r["duration_ms"] for r in w["runs"]), 1), "model_calls": sum(r.get("model_calls", 0) for r in w["runs"]),
                              "input_tokens": sum(r.get("input_tokens", 0) for r in w["runs"]), "output_tokens": sum(r.get("output_tokens", 0) for r in w["runs"]),
                              "pages": sum(len(current(d).get("pages") or []) for d in live_docs(case)), "rules": len(profile.rules),
-                             "graph": graphs.stats(w["graph"])}
+                             "graph": graphs.stats(w["graph"]), "spend": S.since(case, w.get("spend0"))}
     case["assessment"] = assessment
     case.pop("working", None)
     if case.get("decision"):   # a decision belongs to the assessment it was taken on: what changed since has to be decided again

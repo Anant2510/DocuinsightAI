@@ -34,13 +34,27 @@ LASTING = ("documents",)   # kept on the case between assessments; the rest is r
 class GovernedModel:
     """The model as one agent may use it in one run: allowed or not, metered, rate limited."""
 
-    def __init__(self, inner: Any, contract: dict[str, Any], limiter: Any = None, budget: Budget | None = None):
+    def __init__(self, inner: Any, contract: dict[str, Any], limiter: Any = None, budget: Budget | None = None, *, gate: Any = None, sink: Any = None):
         self.inner, self.contract, self.limiter = inner, contract, limiter
         self.allowed = (contract["model"].get("use") or "none") != "none"
         self.budget = budget or Budget()
         self.violations: list[str] = []
         self.waited_ms = 0
         self.shed = 0
+        self.gate, self.sink = gate, sink     # the case's own spend: may this call be made (a limit, a person's stop, a pause), and where it is counted
+        self.refused: list[str] = []          # why calls were not made, in plain words, once each
+        self._docs: list[str] = []
+
+    def about(self, docs: Any) -> None:
+        """The document or documents the next calls are about, so the case's spend can be shown by document."""
+        self._docs = [str(d) for d in (docs or [])]
+        if hasattr(self.inner, "about"):
+            self.inner.about(self._docs)
+
+    def _refuse(self, exc: Throttled) -> None:
+        self.shed += 1
+        if str(exc) not in self.refused:
+            self.refused.append(str(exc))
 
     @property
     def offline(self) -> bool:
@@ -62,16 +76,18 @@ class GovernedModel:
             self.violations.append(f"called a model ({kwargs.get('step') or method}) although its contract says it uses none")
             raise C.ContractBroken(f"the contract of '{self.contract['id']}' does not allow a model call")
         try:
+            if self.gate is not None:   # about how large the request is (four characters to a token), so a limit can hold it back before it is paid for
+                self.gate(list(self._docs), sum(len(a) for a in args[:2] if isinstance(a, str)) // 4)
             self.budget.check()
-        except Throttled:
-            self.shed += 1
+        except Throttled as exc:
+            self._refuse(exc)
             raise
         waited = 0.0
         if self.limiter is not None:
             try:
                 waited = self.limiter.acquire()
-            except Throttled:
-                self.shed += 1
+            except Throttled as exc:
+                self._refuse(exc)
                 raise
         self.waited_ms += round(waited * 1000)
         n0 = len(self.calls)
@@ -84,6 +100,8 @@ class GovernedModel:
                 self.budget.spend(int(c.get("input_tokens") or 0) + int(c.get("output_tokens") or 0))
             if self.limiter is not None:
                 self.limiter.release(tokens)
+            if self.sink is not None and made:
+                self.sink(made, list(self._docs))
 
     def text(self, *args: Any, **kwargs: Any) -> str:
         return self._call("text", *args, **kwargs)
@@ -114,7 +132,9 @@ class Harness:
         ctx: dict[str, Any] = {"agent": agent["id"], "done": list((w or {}).get("done") or [])}
         needs = [{"check": n, "ok": ok, "detail": detail} for n in contract["needs"] for ok, detail in [C.CHECKS[n](case, profile, ctx)]]
         budget = Budget(contract["model"].get("max_calls") or 0, contract["model"].get("max_tokens") or 0)
-        model = GovernedModel(self.tools.model, contract, getattr(self.tools, "limiter", None), budget)
+        gate, spend = getattr(self.tools, "gate", None), getattr(self.tools, "spend", None)
+        model = GovernedModel(self.tools.model, contract, getattr(self.tools, "limiter", None), budget,
+                              gate=(lambda docs, size=0: gate(case, docs, size)) if gate else None, sink=(lambda calls, docs: spend(case, agent["id"], calls, docs)) if spend else None)
         memory = MemoryHandle(agent["id"], contract["memory"], (w if w is not None else {}).setdefault("memory", []), getattr(self.tools, "episodes", None))
         scoped = copy.copy(self.tools)
         scoped.model, scoped.memory = model, memory
@@ -150,7 +170,7 @@ class Harness:
                     if not ok:
                         broken.append(f"promise not kept: {p.get('text') or p['check']} ({detail})")
             trace["contract"].update(kept=not broken, broken=broken)
-            trace.update(duration_ms=ms, touched=touched, budget=budget.snapshot(), throttle={"waited_ms": model.waited_ms, "shed": model.shed}, memory=memory.summary(),
+            trace.update(duration_ms=ms, touched=touched, budget=budget.snapshot(), throttle={"waited_ms": model.waited_ms, "shed": model.shed, "why": list(model.refused)}, memory=memory.summary(),
                          sections={"read": read, "wrote": touched}, grounding=handed)
             for sec in touched:   # the run's shared memory: who has written each part of the case so far
                 if agent["id"] not in writers.setdefault(sec, []):

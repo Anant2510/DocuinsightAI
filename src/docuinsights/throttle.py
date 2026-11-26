@@ -23,6 +23,13 @@ class Throttled(RuntimeError):
     """A call was not let through: the limiter shed it, or the agent's budget is spent."""
 
 
+def why(exc: BaseException) -> str:
+    """Why a model call was not made or did not work, as a run's notes say it: the reason itself when the call was held back
+    (a limit, a person's stop, a pause), otherwise the kind of failure."""
+    return f"not asked: {exc}" if isinstance(exc, Throttled) else type(exc).__name__
+
+
+
 def _env(name: str, default: float) -> float:
     try:
         return float(os.environ.get(name) or default)

@@ -82,7 +82,9 @@ class CaseStore:
                          "title": c.get("fields", {}).get("claim_type") or c.get("fields", {}).get("title") or "",
                          "priority": t.get("priority"), "queue": t.get("queue_name"), "due": t.get("due"), "clock": t.get("clock"), "assigned_to": (c.get("assigned") or {}).get("to"),
                          "open_findings": len(waiting), "watchlist_matches": sum(1 for f in waiting if f.get("agent") == "screening"),
-                         "integrity_alerts": sum(1 for f in waiting if f.get("agent") == "integrity"), "state": (c.get("progress") or {}).get("state")})
+                         "integrity_alerts": sum(1 for f in waiting if f.get("agent") == "integrity"), "state": (c.get("progress") or {}).get("state"),
+                         "spend": {k: ((c.get("spend") or {}).get("totals") or {}).get(k, 0) for k in ("calls", "input_tokens", "output_tokens", "cost", "unpriced", "listed", "failed", "ms")},
+                         "model_off": bool((c.get("spend") or {}).get("model_off")), "currency": (c.get("spend") or {}).get("currency") or "USD"})
         return sorted(rows, key=lambda r: r.get("created_at") or "", reverse=True)
 
     def write_file(self, tenant: str, reference: str, doc_id: str, version: int, name: str, data: bytes) -> str:
