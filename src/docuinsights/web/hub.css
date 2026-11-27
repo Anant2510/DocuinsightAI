@@ -154,7 +154,9 @@ h2.sub { font: 660 18px/1.3 var(--display); letter-spacing: -.01em; margin: 34px
 .barrow { display: grid; grid-template-columns: 190px minmax(0, 1fr) 44px; gap: 10px; align-items: center; font-size: 13px; padding: 3px 0; } .barrow b { text-align: right; font-family: var(--mono); font-size: 12.5px; font-weight: 500; }
 .bar { height: 8px; background: #eeeef1; border-radius: 99px; overflow: hidden; } .bar i { display: block; height: 100%; background: var(--info); border-radius: 99px; }
 details.card > summary { cursor: pointer; font-weight: 650; font-size: 14px; } details.card[open] > summary { margin-bottom: 4px; }
-.top .brand { flex: none; } .top nav.tabs { min-width: 0; }
+.top .brand { flex: none; } .top nav.tabs { min-width: 0; flex: 0 1 auto; overflow-x: auto; scrollbar-width: none; } .top nav.tabs::-webkit-scrollbar { display: none; } .top .tag, .top .btn { flex: none; }
+@media (max-width: 1500px) { .top nav.tabs button { padding: 7px 10px; font-size: 13px; } }
+.btn { white-space: nowrap; }
 @media (max-width: 980px) { .top { padding: 0 12px; } .top nav.tabs { overflow-x: auto; flex: 1 1 auto; scrollbar-width: none; } .top .tag.demo { display: none; } .hero { padding: 24px; grid-template-columns: minmax(0, 1fr); gap: 26px; } .hero h1 { font-size: 28px; }
   .barrow { grid-template-columns: 130px minmax(0, 1fr) 40px; } .card { overflow-x: auto; } .tri-card > div { border-right: 0; border-bottom: 1px solid var(--line); } .qbar .right { margin-left: 0; } }
 

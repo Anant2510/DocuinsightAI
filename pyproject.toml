@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "docuinsights"
-version = "0.7.0"
+version = "0.8.0"
 description = "DocuInsights: agentic document and case intelligence. Classify and read a case package, build a case knowledge graph, check evidence, rules and consistency against a use-case profile, and give a caseworker a verified, traceable recommendation."
 readme = "README.md"
 requires-python = ">=3.10"

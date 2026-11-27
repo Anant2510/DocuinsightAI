@@ -148,10 +148,52 @@ def _span(days: int) -> str:
     return f"{y} year(s), {m} month(s), {d} day(s)"
 
 
+def systems(case: dict[str, Any], profile: Profile, lookup: Any) -> dict[str, Any]:
+    """Ask each system of record the use case names for this case's record. A system that does not answer is said to be unavailable:
+    it is never read as a record that does not exist."""
+    from . import assurance
+
+    got: dict[str, Any] = {}
+    out, calls = [], []
+    for sysd in profile.systems:
+        sid, name = sysd["id"], sysd.get("name") or sysd["id"]
+        keys = assertions(case, profile, sysd["key"])
+        key = keys[0]["value"] if keys else ""
+        ans = lookup(sysd, key) if lookup else {"system": sid, "name": name, "key": str(key), "status": "not_configured", "reason": f"no connector is configured for {name}", "record": {}, "connector": "none", "demonstration": False, "ms": 0}
+        got[sid] = ans
+        calls.append({"tool": f"system:{sid}", "status": ans["status"], "ms": ans.get("ms", 0)})
+        kw = {"agent": "reference", "rule": assurance.rule_of(profile, f"systems.{sid}"), "sources": keys[:1], "path": ["case"]}
+        demo = " This is demonstration data, not a system of record." if ans.get("demonstration") else ""
+        label = profile.field_name(sysd["key"])
+        if ans["status"] == "found":
+            shown = ", ".join(f"{(profile.spec_of(f'record.{sid}.{k}') or {}).get('name') or k}: {v}" for k, v in list(ans["record"].items())[:6])
+            out.append(finding(f"REC-{sid}", "record", f"{name}: the record of this case", "pass", f"{name} holds a record under {key}.{demo}", severity="medium",
+                               reasoning=[f"{label}: {key} (from {keys[0]['doc_name']}).", f"Asked {name} ({ans.get('connector')} connector, {ans.get('ms', 0)} ms).", f"It answered: {shown}.",
+                                          "The rules that name this record are run against it."], requires_human=False, data={"system": sid, "key": str(key), "connector": ans.get("connector")}, **kw))
+        elif ans["status"] == "not_found":
+            out.append(finding(f"REC-{sid}", "record", f"{name}: the record of this case", "fail", f"{name} holds no record under {key}.{demo}", severity="high",
+                               reasoning=[f"{label}: {key} (from {keys[0]['doc_name']}).", f"Asked {name} ({ans.get('connector')} connector): no record under that key.",
+                                          "Conclusion: what the documents say cannot be confirmed against the record. A person checks the key and the record."],
+                               data={"system": sid, "key": str(key), "connector": ans.get("connector")}, **kw))
+        else:
+            why = ans.get("reason") or ans["status"].replace("_", " ")
+            out.append(finding(f"REC-{sid}", "record", f"{name}: the record of this case", "review", f"{name} could not be asked: {why}.", severity="high",
+                               reasoning=([f"{label}: {key} (from {keys[0]['doc_name']})."] if keys else [f"{label} was not found, so there is nothing to look the record up by."])
+                               + [f"{name}: {why}.", "A system that did not answer is not a record that does not exist: the rules that need the record go to a person."],
+                               data={"system": sid, "key": str(key), "connector": ans.get("connector"), "status": ans["status"]}, **kw))
+    return {"systems": got, "findings": out, "tool_calls": calls,
+            "summary": "; ".join(f"{a['name']}: {a['status'].replace('_', ' ')}" for a in got.values())}
+
+
+def _said(a: dict[str, Any]) -> str:
+    return f"{a['field_name']}: {V.display(a['norm']) if isinstance(a['norm'], dict) else a['value']} (from {a['doc_name']})."
+
+
 def policy(case: dict[str, Any], profile: Profile, refs: list[dict[str, Any]]) -> dict[str, Any]:
     out = []
     for r in profile.rules:
-        rule = {"id": r["id"], "version": str(r.get("version") or profile.version), "title": r.get("title") or r["id"], "note": r.get("note") or "", "type": r["type"]}
+        rule = {"id": r["id"], "version": str(r.get("version") or profile.version), "title": r.get("title") or r["id"], "note": r.get("note") or "", "type": r["type"],
+                "params": {k: v for k, v in r.items() if k not in ("id", "title", "note", "family", "version", "type")}}   # the rule as it stood when it ran
         kw = {"agent": "policy", "rule": rule}
         fid, fam, title = f"RULE-{r['id']}", r.get("family") or "policy", rule["title"]
 
@@ -159,8 +201,57 @@ def policy(case: dict[str, Any], profile: Profile, refs: list[dict[str, Any]]) -
             return assertions(case, profile, ref)
 
         def path_of(srcs: list[dict[str, Any]]) -> list[str]:
-            return ["case" if s["doc"] == "case" else aid(s["doc"], s["field"]) for s in srcs]
+            return ["case" if s["doc"] == "case" or str(s["doc"]).startswith("record:") else aid(s["doc"], s["field"]) for s in srcs]
 
+        if r["type"] == "unrunnable":   # a rule of the workspace's own that this build can no longer run: said, and sent to a person, never skipped
+            out.append(finding(fid, fam, title, "review", f"This rule could not be run: {r['problem']}. Correct it or remove it on the Rules screen.", severity="high", sources=[], path=["case"],
+                               reasoning=[f"Rule {r['id']} was sound when it was saved in this workspace.", f"As the use case stands now: {r['problem']}.",
+                                          "A rule that cannot run is not a rule that passed: a person decides what it was there to check."], **kw))
+            continue
+        when = r.get("applies_when")
+        if when:   # a rule for some cases only (a region, a product): where it does not apply it says so, and is neither passed nor failed
+            seen = need(when["ref"])
+            other = bool(when.get("not_in"))   # "everywhere but": the rule for the cases no more particular rule covers
+            want = [str(x) for x in (when.get("not_in") or when.get("in") or [when.get("is")])]
+            have = V.plain(str(seen[0]["value"])) if seen else None
+            if have is None or (have in {V.plain(x) for x in want}) == other:
+                out.append(finding(fid, fam, title, "info", ("Does not apply: " + seen[0]["field_name"] + " is " + str(seen[0]["value"]) if seen else f"Not evaluated: {profile.field_name(when['ref'])} is not available") + ".",
+                                   severity="low", sources=seen[:1], path=path_of(seen[:1]), requires_human=False,
+                                   reasoning=[f"Rule {r['id']} v{rule['version']} applies when {profile.field_name(when['ref'])} is {'none of ' if other else ''}{' or '.join(want)}.",
+                                              _said(seen[0]) if seen else f"{profile.field_name(when['ref'])} was not found.", "Conclusion: the rule is not run for this case."], **kw))
+                continue
+        if r["type"] in ("required_field", "value_in", "value_limit"):
+            got = need(r["field"])
+            if not got:
+                status = "fail" if r["type"] == "required_field" else "review"
+                out.append(finding(fid, fam, title, status, (f"{profile.field_name(r['field'])} is not stated." if status == "fail" else f"Cannot be evaluated: {profile.field_name(r['field'])} not available."),
+                                   severity=r.get("severity") or "high", reasoning=[f"{profile.field_name(r['field'])} is needed and was not found.", f"Rule {r['id']} v{rule['version']}. Conclusion: {status}."], path=[], **kw))
+                continue
+            a, steps = got[0], [_said(got[0])]
+            if r["type"] == "required_field":
+                ok, msg = True, f"{a['field_name']} is stated: {a['value']}."
+            elif r["type"] == "value_in":
+                allowed, negate = [str(x) for x in r["values"]], bool(r.get("negate"))
+                inside = V.plain(str(a["value"])) in {V.plain(x) for x in allowed}
+                ok = inside != negate
+                steps.append(f"Rule {r['id']} v{rule['version']}: the value must {'not ' if negate else ''}be one of: {', '.join(allowed)}.")
+                msg = f"{a['field_name']} is {a['value']}, which is {'' if inside else 'not '}one of {', '.join(allowed)}."
+            else:
+                n = a["norm"]["amount"] if isinstance(a["norm"], dict) else float(a["norm"])
+                lo, hi = (float(r["min"]) if r.get("min") not in (None, "") else None), (float(r["max"]) if r.get("max") not in (None, "") else None)
+                cur, ok = str(r.get("currency") or "").upper(), True
+                other = cur and isinstance(a["norm"], dict) and (a["norm"].get("currency") or cur) != cur
+                if other:
+                    ok = False
+                    steps.append(f"The value is in {a['norm'].get('currency')} and the limit is in {cur}: they cannot be compared without an approved rate.")
+                ok = ok and (lo is None or n >= lo) and (hi is None or n <= hi)
+                bounds = " and ".join(x for x in (f"at least {lo:,.2f}" if lo is not None else "", f"at most {hi:,.2f}" if hi is not None else "") if x) + (f" {cur}" if cur else "")
+                steps.append(f"Rule {r['id']} v{rule['version']}: the value must be {bounds}.")
+                msg = (f"{a['field_name']} is {V.display(a['norm'])} and the limit is in {cur}: they cannot be compared without an approved rate." if other
+                       else f"{a['field_name']} is {V.display(a['norm']) if isinstance(a['norm'], dict) else a['value']}; it must be {bounds}.")
+            steps.append(f"Conclusion: {'pass' if ok else 'fail'}.")
+            out.append(finding(fid, fam, title, "pass" if ok else "fail", msg, severity=r.get("severity") or "high", reasoning=steps, sources=[a], path=path_of([a]), **kw))
+            continue
         if r["type"] in ("date_interval", "date_order"):
             a_ref, b_ref = (r["from"], r["to"]) if r["type"] == "date_interval" else (r["first"], r["then"])
             a, b = need(a_ref), need(b_ref)
@@ -211,7 +302,9 @@ def policy(case: dict[str, Any], profile: Profile, refs: list[dict[str, Any]]) -
                 steps.append(f"{a['field_name']} differs from {base['field_name']} by {diff:+.2f}% ({V.display(a['norm'])} vs {V.display(base['norm'])}): "
                              f"{'within' if within else 'outside'} the {tol}% tolerance.")
             steps.append(f"Rule {r['id']} v{rule['version']}. Conclusion: {'pass' if ok else 'fail'}." + (f" Not available: {', '.join(absent)}." if absent else ""))
-            if r["type"] == "amount_limit":
+            if len(currencies) > 1:   # the percentages above compare numbers in different money: the headline says what is actually wrong
+                msg = "The amounts are in different currencies (" + ", ".join(sorted(currencies)) + "): they cannot be compared without an approved rate."
+            elif r["type"] == "amount_limit":
                 over = (have[0]["norm"]["amount"] - base["norm"]["amount"]) / base["norm"]["amount"] * 100 if base["norm"]["amount"] else 0.0
                 msg = (f"{V.display(have[0]['norm'])} is within the limit of {V.display(base['norm'])}" if ok else
                        f"{V.display(have[0]['norm'])} exceeds the limit of {V.display(base['norm'])} by {over:.2f}% (tolerance {tol}%)") + "."

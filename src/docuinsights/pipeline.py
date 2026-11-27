@@ -61,7 +61,8 @@ class Tools:
                  ground: Callable[..., dict[str, Any] | None] | None = None, today: Callable[[], date] | None = None,
                  watchlists: Callable[[], list[dict[str, Any]]] | None = None, gate: Callable[[dict[str, Any], list[str], int], None] | None = None,
                  spend: Callable[[dict[str, Any], str, list[dict[str, Any]], list[str]], None] | None = None,
-                 stopped: Callable[[dict[str, Any]], str | None] | None = None, price: Callable[[dict[str, Any]], float | None] | None = None) -> None:
+                 stopped: Callable[[dict[str, Any]], str | None] | None = None, price: Callable[[dict[str, Any]], float | None] | None = None,
+                 lookup: Callable[[dict[str, Any], Any], dict[str, Any]] | None = None) -> None:
         self.model = model or OfflineModel()
         self.read_bytes = read_bytes
         self.overlay = overlay or {}
@@ -79,6 +80,7 @@ class Tools:
         self.spend = spend        # where the model calls an agent made for a case are counted
         self.stopped = stopped    # the reason a person stopped this assessment, or None: asked before every stage
         self.price = price        # what one model call cost at the price in force, or None when there is no price for it
+        self.lookup = lookup      # ask a system of record for a record by key (systems.lookup, with the installation's connectors)
         self.memory: Any = None   # the memory handle of the agent that is running; set by the harness
         self.grounding: Any = None   # what the harness handed the agent that is running
 
@@ -153,6 +155,12 @@ def _run_stage(stage: str, case: dict[str, Any], profile: Profile, tools: Tools,
     elif stage == "reference":
         out = checks.references(case, profile, w["entities"], g, fetch=tools.fetch)
         w["references"] = out.pop("records")
+        if profile.systems:   # what the business already holds about the case, for the rules that name it
+            rec = checks.systems(case, profile, tools.lookup)
+            w["systems"] = rec["systems"]
+            out["findings"] = [*out["findings"], *rec["findings"]]
+            out["tool_calls"] = [*(out.get("tool_calls") or []), *rec["tool_calls"]]
+            out["summary"] = "; ".join(x for x in (out.get("summary") if profile.references else "", rec["summary"]) if x)
     elif stage == "policy":
         out = checks.policy(case, profile, w["references"])
     elif stage == "consistency":
@@ -213,7 +221,7 @@ def plan(stage: str, case: dict[str, Any], profile: Profile, w: dict[str, Any]) 
     if stage == "evidence":
         return [f"Check: {ev['title']}" for ev in profile.evidence]
     if stage == "reference":
-        return [f"Retrieve {r.get('name') or r['id']} for the date of the case" for r in profile.references]
+        return [f"Retrieve {r.get('name') or r['id']} for the date of the case" for r in profile.references] + [f"Ask {x.get('name') or x['id']} for the record of the case" for x in profile.systems]
     if stage == "policy":
         return [f"Run the rule: {r.get('title') or r['id']}" for r in profile.rules]
     if stage == "consistency":
@@ -317,6 +325,8 @@ def _finish(case: dict[str, Any], profile: Profile, tools: Tools, w: dict[str, A
                              "input_tokens": sum(r.get("input_tokens", 0) for r in w["runs"]), "output_tokens": sum(r.get("output_tokens", 0) for r in w["runs"]),
                              "pages": sum(len(current(d).get("pages") or []) for d in live_docs(case)), "rules": len(profile.rules),
                              "graph": graphs.stats(w["graph"]), "spend": S.since(case, w.get("spend0"))}
+    assessment["systems"] = w.get("systems") or {}          # the records the rules were run against, as they were when it ran
+    assessment["rulebook"] = getattr(profile, "rulebook", None) or {"version": 0, "changed": []}   # which version of the workspace's rules was in force
     case["assessment"] = assessment
     case.pop("working", None)
     if case.get("decision"):   # a decision belongs to the assessment it was taken on: what changed since has to be decided again

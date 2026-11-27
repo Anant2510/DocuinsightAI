@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from collections import Counter
 from datetime import date, datetime, timedelta
 from html import escape
@@ -176,6 +177,14 @@ class _Html(str):
     """Markup built here, which is written into the page as it is. Everything else is escaped."""
 
 
+def _version(v: Any) -> str:
+    """A rule's version as a reader takes it: 1.0 as shipped; 1.0+w3 changed in the workspace's rules version 3; w2 added there."""
+    m = re.fullmatch(r"(?:(.+)\+)?w(\d+)", str(v or ""))
+    if not m:
+        return f"v{v}"
+    return f"v{m.group(1)}, changed here (rules v{m.group(2)})" if m.group(1) else f"added here (rules v{m.group(2)})"
+
+
 def decision_record(case: dict[str, Any], profile: Profile, *, ledger: dict[str, Any] | None = None, entries: list[dict[str, Any]] | None = None, masked: bool = False, by: str = "") -> str:
     """The case as one printable page. With `masked`, personal data is masked throughout (for a copy that leaves the organisation)."""
     a = case.get("assessment") or {}
@@ -254,7 +263,7 @@ def decision_record(case: dict[str, Any], profile: Profile, *, ledger: dict[str,
         for f in sorted(found, key=lambda x: (rank.get(x["status"], 9), x["id"])):
             out.append(f'<div class="f"><div class="t"><b>{e(f["title"])}</b><span class="mono meta">{escape(f["id"])}</span>{pill(f["status"])}</div><div>{e(f.get("message"))}</div>')
             rule = f.get("rule") or {}
-            bits = [f"Agent: {escape(str(f.get('agent')))}"] + ([f"Rule {escape(str(rule.get('id')))} v{escape(str(rule.get('version')))}"] if rule else [])
+            bits = [f"Agent: {escape(str(f.get('agent')))}"] + ([f"Rule {escape(str(rule.get('id')))} {escape(_version(rule.get('version')))}"] if rule else [])
             bits += [f"Sources verified: {f['verifier'].get('verified')} of {f['verifier'].get('sources')}"] if f.get("verifier") and f["verifier"].get("sources") else []
             out.append(f'<div class="meta">{" · ".join(bits)}</div>')
             for b in f.get("basis") or []:
@@ -268,6 +277,24 @@ def decision_record(case: dict[str, Any], profile: Profile, *, ledger: dict[str,
                 h = f["human"]
                 out.append(f'<div class="src"><b>Reviewer:</b> {escape(str(h.get("decision")))} by {e(h.get("by"))} on {escape(str(h.get("at")))}' + (f": {e(h.get('note'))}" if h.get("note") else "") + "</div>")
             out.append("</div>")
+        out.append("</section>")
+
+    # ---- the systems of record that were asked, and the rules in force
+    asked = a.get("systems") or {}
+    book = a.get("rulebook") or {}
+    if asked or book:
+        out.append("<section><h2>Rules and records</h2>" + kv([("Rules in force", (f"Version {book.get('version')} of this workspace's rules" + (f" ({len(book.get('changed') or [])} changed or added here)" if book.get("changed") else ""))
+                                                                 if book.get("version") else f"As shipped with profile v{a.get('profile_version') or profile.version}: nothing was changed in this workspace")]))
+        if asked:
+            word = {"found": "Record found", "not_found": "No record under that key", "unavailable": "Did not answer", "not_configured": "No connector configured", "not_asked": "Not asked"}
+            rows = []
+            for sid, ans in asked.items():
+                spec = {f["id"]: f for f in next((x.get("fields") or [] for x in profile.systems if x["id"] == sid), [])}
+                said = "; ".join(f"{escape((spec.get(k) or {}).get('name') or k)}: {e(v)}" for k, v in (ans.get("record") or {}).items()) or escape(str(ans.get("reason") or ""))
+                rows.append(f"<tr><td>{e(ans.get('name') or sid)}</td><td class='mono'>{e(ans.get('key'))}</td><td>{escape(word.get(ans.get('status'), str(ans.get('status'))))}</td>"
+                            f"<td>{escape(str(ans.get('connector') or ''))}" + (" · invented record, for demonstration" if ans.get("demonstration") else "") + f"</td><td>{said}</td></tr>")
+            out.append("<table style='margin-top:10px'><thead><tr><th>System of record</th><th>Asked for</th><th>Answer</th><th>Connector</th><th>What it said, as it stood at the assessment</th></tr></thead><tbody>"
+                       + "".join(rows) + "</tbody></table>")
         out.append("</section>")
 
     # ---- screening and personal data

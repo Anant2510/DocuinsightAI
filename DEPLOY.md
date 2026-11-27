@@ -121,6 +121,19 @@ To choose the key yourself, or to change it (the old key stops working at once):
 .\deploy\windows\service.ps1 -Restart
 ```
 
+**Who may change the rules.** With only the API key, anyone who can open the workbench can change a rule, a price or
+a limit. To keep those changes for whoever governs the workspace, add a second key and give it only to them (the
+workbench asks for it when such a change is made; casework never needs it):
+
+```powershell
+Add-Content .env 'DOCUINSIGHTS_ADMIN_KEY=<a long value of your own>'
+.\deploy\windows\service.ps1 -Restart
+```
+
+**Your systems of record.** The insurance use case checks each claim against a policy administration system; invented
+records for the United States and India answer until you name your own (`DOCUINSIGHTS_SYSTEM_POLICY_ADMIN_URL` and
+its neighbours in `.env.example`, or an adapter). The Connectors screen shows what is connected and tests a lookup.
+
 Another system calls the same server with the key as a bearer token:
 `POST https://<your server>/docuinsights/api/v1/cases` (see `DOCUINSIGHTS.md`).
 

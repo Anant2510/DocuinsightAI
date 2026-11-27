@@ -12,17 +12,18 @@ import hashlib
 import hmac
 import json
 import os
+from urllib.parse import urlsplit
 import threading
 import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from . import assurance, contracts as C, extras, harness as H, kb as KB, model as M, net, ontology as O, pipeline as P, reader, reports, repository as Repo, spend as S, throttle as T
+from . import assurance, checks, contracts as C, extras, harness as H, kb as KB, model as M, net, ontology as O, pipeline as P, reader, reports, repository as Repo, rulebook as RB, spend as S, systems as SYS, throttle as T
 from .ledger import Ledger, digest
 from .memory import SCOPES, Episodes
 from .casefile import current, doc_type, event, live_docs, new_case, now
-from .profiles import Profile, get_profile, load_profiles
+from .profiles import Profile, ProfileError, get_profile, load_profiles
 from .store import CaseStore, safe
 
 HERE = Path(__file__).resolve().parent
@@ -124,14 +125,14 @@ class Service:
         """What a case teaches the workspace: its episode, and its part of the knowledge graph. Called when an assessment ends and when
         a person decides the case. A failure here never fails the case: it is recorded on the case instead."""
         try:
-            profile = get_profile(case["profile"])
+            profile = self._p(tenant, case["profile"])
             kb = self.knowledge(tenant)
             contribution = KB.case_contribution(case, profile, kb.owner)
             if contribution is None:
                 return None
             self.episodes(tenant).remember(case, profile)
             kb.put_source("cases", case["reference"], contribution)
-            index = kb.rebuild(list(load_profiles().values()))
+            index = kb.rebuild(list(self._ps(tenant).values()))
             self.ledger(tenant).append("knowledge", "orchestrator", f"Knowledge base rebuilt after the {why} of {case['reference']}: {index['entities']} entities, {index['triples']} relationships",
                                        case=case["reference"], data={"entities": index["entities"], "relationships": index["triples"], "quality": index["quality"], "contribution": digest(contribution["triples"])})
             case["learned"] = {"at": now(), "entities": len(contribution["entities"]), "relationships": len(contribution["triples"]), "knowledge": {"entities": index["entities"], "relationships": index["triples"], "levels": index.get("byLevel") or {}}}
@@ -148,7 +149,7 @@ class Service:
         if not url.lower().startswith(("https://", "http://")):
             return None
         try:
-            profile = get_profile(case["profile"])
+            profile = self._p(tenant, case["profile"])
             names = assurance.personal_names(case, profile)
         except Exception:
             names = []
@@ -198,7 +199,172 @@ class Service:
                        on_finish=(lambda c: (self.learn(tenant, c), self.notify(tenant, c, "case.assessed"))) if record else None,
                        ground=(lambda agent, c, prof, classes: kb.grounding(prof.name, classes)) if kb.built() else None,
                        gate=lambda c, docs, size=0: self._may_call(tenant, c, docs, size), spend=lambda c, agent_id, calls, docs: S.record(c, agent_id, calls, docs, self.spend_settings(tenant).read()),
-                       stopped=lambda c: self._stopped(tenant, c), price=lambda call: S.cost_of(call, self.spend_settings(tenant).read()))
+                       stopped=lambda c: self._stopped(tenant, c), price=lambda call: S.cost_of(call, self.spend_settings(tenant).read()),
+                       lookup=lambda sysd, key: self._lookup(tenant, case, sysd, key))
+
+    # ------------------------------------------------------------------ the workspace's own rules, and the systems of record they are run against
+    def rulebook(self, tenant: str, profile_id: str) -> RB.Rulebook:
+        return RB.Rulebook(self._home(tenant) / "rules" / f"{get_profile(profile_id).id}.json")
+
+    def _book(self, tenant: str, profile_id: str) -> dict[str, Any]:
+        """The workspace's own rules for a use case. A file that cannot be read stops the work and says so: it is never taken for "no rules of our own"."""
+        try:
+            return self.rulebook(tenant, profile_id).read()
+        except RB.RuleError as exc:
+            raise ServiceError(str(exc)[:1].upper() + str(exc)[1:], 409) from exc
+
+    def _p(self, tenant: str, profile_id: str | None) -> Any:
+        """The use case as this workspace runs it: its shipped rules with the workspace's own laid over them."""
+        profile = get_profile(profile_id)
+        return RB.apply(profile, self._book(tenant, profile.id))
+
+    def profile(self, tenant: str, profile_id: str | None) -> Any:
+        """The use case as this workspace runs it. Whatever assesses a case outside the service (the orchestration layer's agents) asks here,
+        so that a rule changed on the Rules screen is the rule every path applies."""
+        return self._p(tenant, profile_id)
+
+    def _ps(self, tenant: str) -> dict[str, Any]:
+        """Every use case as this workspace runs it, for the knowledge graph. One use case's damaged rules file stops that use case's assessments
+        (`_p`); it does not stop the others, so here it is drawn as shipped."""
+        out = {}
+        for pid, shipped in load_profiles().items():
+            try:
+                out[pid] = self._p(tenant, pid)
+            except ServiceError:
+                out[pid] = shipped
+        return out
+
+    def rules(self, tenant: str, profile_id: str) -> dict[str, Any]:
+        """Every rule of a use case as this workspace runs it: what it says, where it comes from, whether it is on, and how it got that way."""
+        profile = get_profile(profile_id)
+        return RB.listing(profile, self._book(tenant, profile.id))
+
+    def change_rules(self, tenant: str, profile_id: str, ops: Any, *, by: str = "caseworker") -> dict[str, Any]:
+        """Make one change, or several as one (a filled-in sheet): all are checked before any is kept. Each is written to the provenance ledger."""
+        profile = get_profile(profile_id)
+        store = self.rulebook(tenant, profile.id)
+        with self._hold(tenant, f"rules-{profile.id}"):
+            book, entries = self._book(tenant, profile.id), []
+            try:
+                for op in (ops if isinstance(ops, list) else [ops]):
+                    book, entry = RB.change(profile, book, op, by=by)
+                    entries.append(entry)
+            except (RB.RuleError, ProfileError) as exc:
+                raise ServiceError(str(exc)) from exc
+            if not entries:
+                raise ServiceError("nothing to change")
+            store.save(book)
+            for e in entries:
+                self.ledger(tenant).append("rules", by, f"{profile.name}: {e['group'][:-1] if e['group'] == 'rules' else e['group']} '{e['id']}' {e['what']}" + (f" ({e['note']})" if e.get("note") else ""),
+                                           data={"profile": profile.id, "version": e["version"], "before": e.get("before"), "after": e.get("after")})
+        try:   # the knowledge graph names the rules in force: a rule added here becomes a node like one that shipped
+            kb = self.knowledge(tenant)
+            if kb.built():
+                kb.rebuild(list(self._ps(tenant).values()))
+        except Exception as exc:   # noqa: BLE001 (the rules are saved; the graph is rebuilt on its next build)
+            self.ledger(tenant).append("rules", "system", f"The knowledge graph was not rebuilt after the change ({type(exc).__name__})")
+        return self.rules(tenant, profile.id)
+
+    def test_rule(self, tenant: str, profile_id: str, rule: dict[str, Any], reference: str) -> dict[str, Any]:
+        """Run one rule, as given, against a case that has been assessed. Nothing is saved: the case, its findings and the rules stay as they are."""
+        shipped = get_profile(profile_id)
+        case = self.case(tenant, reference)
+        if case["profile"] != shipped.id:
+            raise ServiceError(f"case {reference} is a {get_profile(case['profile']).name} case, not a {shipped.name} case")
+        if not case.get("assessment"):
+            raise ServiceError("assess the case first: a rule is tested against what was read from its documents")
+        rid = str((rule or {}).get("id") or "trial").strip().lower() or "trial"
+        try:
+            clean = RB._clean(rule, shipped, rid if RB.ID.match(rid) else "trial")
+        except (RB.RuleError, ProfileError) as exc:
+            raise ServiceError(str(exc)) from exc
+        import copy as _copy
+
+        trial = _copy.copy(shipped)
+        trial.rules = [{**clean, "version": "trial"}]
+        f = checks.policy(case, trial, (case["assessment"].get("references") or []))["findings"][0]
+        return {"case": reference, "status": f["status"], "message": f["message"], "reasoning": f.get("reasoning") or [], "says": RB.sentence(clean, shipped),
+                "sources": [{k: s.get(k) for k in ("doc_name", "field_name", "value")} for s in f.get("sources") or []]}
+
+    def rules_template(self, tenant: str, profile_id: str) -> str:
+        profile = get_profile(profile_id)
+        return RB.template_csv(profile, self._book(tenant, profile.id))
+
+    def rules_workbook(self, tenant: str, profile_id: str) -> bytes:
+        """The same sheet as a workbook for a spreadsheet: the rules in force, how each kind is written, and the names a rule can use."""
+        profile = get_profile(profile_id)
+        return RB.template_xlsx(profile, self._book(tenant, profile.id))
+
+    def import_rules(self, tenant: str, profile_id: str, text: str | bytes, *, by: str = "caseworker", apply: bool = False) -> dict[str, Any]:
+        """Read a filled-in rules sheet (the workbook, or the same sheet as text). Without `apply` it only says what each row would do; with it,
+        the rows that are sound are made as one change each, and a row that is not is left out and says why."""
+        profile = get_profile(profile_id)
+        try:
+            if isinstance(text, (bytes, bytearray)):
+                data = bytes(text)
+                if len(data) > 5 * 1024 * 1024:
+                    raise RB.RuleError("a rules sheet is at most 5 MB")
+                if data[:2] == b"PK":
+                    text = RB.sheet_text(data)
+                else:
+                    try:
+                        text = data.decode("utf-8-sig")
+                    except UnicodeDecodeError:   # a sheet saved as plain CSV by a spreadsheet on Windows
+                        text = data.decode("cp1252", "replace")
+            rows = RB.read_template(profile, self._book(tenant, profile.id), text)
+        except RB.RuleError as exc:
+            raise ServiceError(str(exc)) from exc
+        ops = [{**op, "note": op.get("note") or "From the rules sheet"} for r in rows for op in r["ops"]]
+        done = bool(apply and ops)
+        if done:
+            self.change_rules(tenant, profile.id, ops, by=by)
+        return {"rows": [{k: v for k, v in r.items() if k != "ops"} for r in rows], "changes": len(ops), "refused": sum(1 for r in rows if r["does"] == "refused"), "applied": done,
+                "rules": self.rules(tenant, profile.id) if done else None}
+
+    def _lookup(self, tenant: str, case: dict[str, Any], system: dict[str, Any], key: Any) -> dict[str, Any]:
+        ans = SYS.lookup(system, key)
+        self.ledger(tenant).append("system", "reference", f"{ans['name']} asked for {ans['key'] or 'nothing'}: {ans['status'].replace('_', ' ')} ({ans.get('ms', 0)} ms)", case=case.get("reference", ""),
+                                   data={"system": ans["system"], "connector": ans["connector"], "status": ans["status"], "ms": ans.get("ms", 0), "reason": ans.get("reason") or ""})
+        return ans
+
+    def connectors(self, tenant: str) -> dict[str, Any]:
+        """The three places a case meets the systems around it: where it comes in, what it is checked against, and where the answer goes."""
+        systems = []
+        for p in load_profiles().values():
+            for sysd in p.systems:
+                systems.append({"profile": p.id, "use_case": p.name, "id": sysd["id"], "name": sysd.get("name") or sysd["id"], "key": p.field_name(sysd["key"]),
+                                "fields": [{"id": f["id"], "name": f.get("name") or f["id"], "type": f.get("type", "text")} for f in sysd.get("fields") or []], **SYS.connector_of(sysd),
+                                "settings": [{"name": f"DOCUINSIGHTS_SYSTEM_{sysd['id'].upper()}_{k}", "what": what} for k, what in (
+                                    ("URL", "the address of your system: https://…/{key}"), ("TOKEN", "its credential, sent as a bearer token"), ("METHOD, _BODY", "GET, or POST with the JSON to send"),
+                                    ("RECORD", "where the record sits in the answer"), ("NOT_FOUND, _OK", "the answers that mean no such record, and a good answer"),
+                                    ("MAP", "your field names, where they differ"), ("ADAPTER", "your own code instead, where settings are not enough"))]})
+        calls = [e for e in self.ledger(tenant).entries(limit=2000) if e.get("kind") == "system"]
+        by_status: dict[str, int] = {}
+        for e in calls:
+            st = (e.get("data") or {}).get("status") or "unknown"
+            by_status[st] = by_status.get(st, 0) + 1
+        repo = self.repository.status()
+        hook = (os.environ.get("DOCUINSIGHTS_WEBHOOK_URL") or "").strip()
+        return {"intake": {"api": "/api/v1/cases", "authenticated": bool((os.environ.get("DOCUINSIGHTS_API_KEY") or "").strip()), "accepts": sorted(reader.MIME),
+                           "repository": repo, "ways": ["POST /api/v1/cases with the documents (base64) or a repository reference", "Upload on the workbench", "The CX Nova layer's di_intake agent"]},
+                "systems": systems, "lookups": {"total": len(calls), "by_status": by_status, "latest": [{"at": e.get("at"), "summary": e.get("summary"), "case": e.get("case")} for e in calls[:12]]},
+                "write_back": {"repository": repo, "webhook": {"on": bool(hook), "target": urlsplit(hook).netloc if hook else "", "signed": bool((os.environ.get("DOCUINSIGHTS_WEBHOOK_SECRET") or "").strip()),
+                                                                 "events": ["case.assessed", "case.decided"]},
+                               "api": ["GET /api/v1/cases/{reference}", "GET /api/v1/cases/{reference}/record", "POST /api/v1/cases/{reference}/decision"]},
+                "adapter": {"contract": "lookup(system, key, settings) -> {status: found | not_found | unavailable, record, reason}", "reference": "docuinsights.adapters.newgen_rest",
+                            "synthetic_on": (os.environ.get("DOCUINSIGHTS_SYNTHETIC_SYSTEMS") or "1").strip().lower() not in ("0", "false", "no", "off")}}
+
+    def test_connector(self, tenant: str, profile_id: str, system_id: str, key: str, *, by: str = "caseworker") -> dict[str, Any]:
+        """Ask a system of record for one key, now, and say what came back and how long it took."""
+        profile = get_profile(profile_id)
+        sysd = next((s for s in profile.systems if s["id"] == system_id), None)
+        if sysd is None:
+            raise ServiceError(f"{profile.name} checks against no system '{system_id}'", 404)
+        if not str(key or "").strip():
+            raise ServiceError("give a key to look up")
+        ans = SYS.lookup(sysd, str(key)[:120])
+        self.ledger(tenant).append("system", by, f"{ans['name']} tested with {ans['key']}: {ans['status'].replace('_', ' ')} ({ans.get('ms', 0)} ms)", data={"system": ans["system"], "connector": ans["connector"], "status": ans["status"], "test": True})
+        return ans
 
     # ------------------------------------------------------------------ spend: what a case costs, and what stops it costing more
     def spend_settings(self, tenant: str) -> S.Settings:
@@ -303,7 +469,7 @@ class Service:
 
     def _agent(self, tenant: str, case: dict[str, Any], agent_id: str, fn: Any, *, model: Any = None, extra: Any = None, summary: Any = None) -> Any:
         """An on-demand agent, run in the harness under its contract like the stage agents. The result carries whether the contract was kept."""
-        profile = get_profile(case["profile"])
+        profile = self._p(tenant, case["profile"])
         tools = self.tools(tenant, case, profile, model, progress=False, record=False)
         tools.ledger = self.ledger(tenant)
         agent = next(a for a in P.AGENTS if a["id"] == agent_id)
@@ -340,7 +506,7 @@ class Service:
         return case
 
     def create_case(self, tenant: str, reference: str, profile_id: str | None, fields: dict[str, Any] | None = None, *, by: str = "caseworker") -> dict[str, Any]:
-        profile = get_profile(profile_id)
+        profile = self._p(tenant, profile_id)
         reference = safe((reference or "").strip(), "case reference")
         fields = fields if isinstance(fields, dict) else {}
         with self._hold(tenant, reference):
@@ -389,7 +555,7 @@ class Service:
         return case
 
     def load_sample(self, tenant: str, profile_id: str, sample_id: str, *, reference: str | None = None, by: str = "caseworker") -> dict[str, Any]:
-        profile = get_profile(profile_id)
+        profile = self._p(tenant, profile_id)
         sample = next((s for s in profile.samples if s["id"] == sample_id), None)
         if sample is None:
             raise ServiceError(f"profile '{profile.id}' has no sample '{sample_id}'; it has: {', '.join(s['id'] for s in profile.samples)}", 404)
@@ -419,7 +585,7 @@ class Service:
             raise ServiceError("this case has no amendment waiting")
         am = pending.pop(0)
         self.store.save(tenant, case)
-        profile = get_profile(case["profile"])
+        profile = self._p(tenant, case["profile"])
         sample = next(s for s in profile.samples if s["id"] == case["sample"]["id"])
         old = next((d for d in case["documents"] if d["name"] == am["replaces"]), None)
         self._add_sample_file(tenant, reference, HERE / "samples" / sample["path"], am["file"], (old or {}).get("category", ""), by, replaces=(old or {}).get("id"), note=am.get("note", ""))
@@ -441,7 +607,7 @@ class Service:
         case = self.case(tenant, reference)
         if not live_docs(case):
             raise ServiceError("the case has no documents yet")
-        profile = get_profile(case["profile"])
+        profile = self._p(tenant, case["profile"])
         key = (tenant, reference)
         if (self._stops.get(key) or {}).get("mode") == "assessment":   # a stop that arrived after the assessment it was meant for had ended
             self._stops.pop(key, None)
@@ -507,7 +673,7 @@ class Service:
     def review(self, tenant: str, reference: str, payload: dict[str, Any], *, by: str = "caseworker") -> dict[str, Any]:
         """A human checkpoint: approve or correct a classification, correct a field, settle a possible entity match, or note a finding."""
         case = self.case(tenant, reference)
-        profile = get_profile(case["profile"])
+        profile = self._p(tenant, case["profile"])
         target, decision = str(payload.get("target") or ""), str(payload.get("decision") or "")
         review = {"id": f"V{len(case['reviews']) + 1}", "at": now(), "by": by, "target": target, "decision": decision, "reason": str(payload.get("reason") or "")[:500]}
         reassess = False
@@ -636,7 +802,7 @@ class Service:
         case = self.case(tenant, reference)
         ledger = self.ledger(tenant)
         ledger.append("record", by, f"Decision record of {reference} produced" + (" with personal data masked" if masked else ""), case=reference, data={"masked": masked})
-        return reports.decision_record(case, get_profile(case["profile"]), ledger=ledger.verify(), entries=ledger.entries(case=reference, limit=1000), masked=masked, by=by)
+        return reports.decision_record(case, self._p(tenant, case["profile"]), ledger=ledger.verify(), entries=ledger.entries(case=reference, limit=1000), masked=masked, by=by)
 
     def queue(self, tenant: str) -> list[dict[str, Any]]:
         """Every case as the work queue shows it: with where it stands against its due date today."""
@@ -670,7 +836,7 @@ class Service:
     def counterfactual(self, tenant: str, reference: str, *, scenario: str | None = None, change: dict[str, Any] | None = None, value: Any = None,
                        model: Any = None) -> dict[str, Any]:
         case = self.case(tenant, reference)
-        profile = get_profile(case["profile"])
+        profile = self._p(tenant, case["profile"])
         title = ""
         if scenario:
             sc = next((c for c in profile.counterfactuals if c["id"] == scenario), None)
@@ -697,7 +863,7 @@ class Service:
     def correspondence(self, tenant: str, reference: str, kind: str, model: Any = None) -> dict[str, Any]:
         case = self.case(tenant, reference)
         try:
-            return self._agent(tenant, case, "correspondence", lambda t: extras.correspondence(case, get_profile(case["profile"]), kind, t.model), model=model,
+            return self._agent(tenant, case, "correspondence", lambda t: extras.correspondence(case, self._p(tenant, case["profile"]), kind, t.model), model=model,
                                extra=lambda o: {"output": o}, summary=lambda o: f"Draft ({kind}): {len(o.get('items') or [])} item(s), {o.get('method')}")
         except (ValueError, C.ContractBroken) as exc:
             raise ServiceError(str(exc)) from exc
@@ -706,7 +872,7 @@ class Service:
     def ask(self, tenant: str, reference: str, question: str, model: Any = None) -> dict[str, Any]:
         case = self.case(tenant, reference)
         try:
-            out = self._agent(tenant, case, "assistant", lambda t: extras.ask(case, get_profile(case["profile"]), question, t.model), model=model,
+            out = self._agent(tenant, case, "assistant", lambda t: extras.ask(case, self._p(tenant, case["profile"]), question, t.model), model=model,
                               extra=lambda o: {"output": o}, summary=lambda o: f"Question answered ({'grounded' if o.get('grounded') else 'declined'}): {question[:120]}")
         except (ValueError, C.ContractBroken) as exc:
             raise ServiceError(str(exc)) from exc
@@ -719,7 +885,7 @@ class Service:
         case = self.case(tenant, reference)
         if not case.get("assessment"):
             raise ServiceError("assess the case before filing it")
-        profile = get_profile(case["profile"])
+        profile = self._p(tenant, case["profile"])
         try:
             repo = self.repository.for_tenant(tenant) if hasattr(self.repository, "for_tenant") else self.repository
             record = self._agent(tenant, case, "repository", lambda t: repo.file_case(case, profile, lambda d, v: self.store.read_file(tenant, reference, v["file"])),
@@ -750,7 +916,9 @@ class Service:
                 blobs[f"D{i}"] = data
                 case["documents"].append({"id": f"D{i}", "name": d["file"], "category": d.get("category", ""), "current": 1,
                                           "versions": [{"v": 1, "sha256": reader.sha256(data), **({"sidecar": side.read_text(encoding="utf-8")} if side.exists() else {})}]})
-            a = P.assess(case, profile, P.Tools(overlay=overlay, read_bytes=lambda d, v: blobs[d["id"]], sidecar=lambda d, v: v.get("sidecar")), trigger="regression")
+            # the bundled samples are run against the bundled records, whatever this installation is connected to: the same answer before and after
+            a = P.assess(case, profile, P.Tools(overlay=overlay, read_bytes=lambda d, v: blobs[d["id"]], sidecar=lambda d, v: v.get("sidecar"), lookup=lambda system, key: SYS.lookup(system, key, env={})),
+                         trigger="regression")
             out[s["id"]] = {"_outcome": a["recommendation"]["outcome"], **{f["id"]: f["status"] for f in a["findings"]},
                             **{f"type:{d['name']}": str(doc_type(d)) for d in case["documents"]}}
         return out
@@ -759,7 +927,7 @@ class Service:
         """Approve or reject an improvement proposal. Approval runs the regression on the bundled samples first: a clean
         run promotes the proposal to a new vocabulary version; a run that changes a sample is held, with the changes
         listed, until the approver accepts those changes explicitly (`accept_changes`)."""
-        profile = get_profile(profile_id)
+        profile = self._p(tenant, profile_id)
         fb = self.store.feedback(tenant, profile.id)
         prop = next((p for p in fb["proposals"] if p["id"] == proposal_id), None)
         if prop is None:
@@ -798,14 +966,14 @@ class Service:
             for row in self.store.list(tenant):
                 try:
                     case = self.store.load(tenant, row["reference"])
-                    profile = get_profile(case["profile"])
+                    profile = self._p(tenant, case["profile"])
                     contribution = KB.case_contribution(case, profile, kb.owner)
                     if contribution:
                         kb.put_source("cases", case["reference"], contribution)
                         episodes.remember(case, profile)
                 except Exception:   # a case from an older version that cannot be read this way is left out, not fatal
                     continue
-            kb.rebuild(list(load_profiles().values()))
+            kb.rebuild(list(self._ps(tenant).values()))
         return kb
 
     def knowledge_import(self, tenant: str, filename: str, data: bytes, label: str = "", *, level: str = "", by: str = "caseworker") -> dict[str, Any]:
@@ -814,7 +982,7 @@ class Service:
             got = kb.add_import(data, filename, label, level)
         except ValueError as exc:
             raise ServiceError(str(exc)) from exc
-        index = kb.rebuild(list(load_profiles().values()))
+        index = kb.rebuild(list(self._ps(tenant).values()))
         self.ledger(tenant).append("knowledge", by, f"Knowledge imported: {got['label']} ({got['entities']} entities, {got['relationships']} relationships)", data={"import": got["id"], "sha256": reader.sha256(data)[:16],
                                                                                                                                                  "entities": index["entities"], "relationships": index["triples"]})
         return {"import": got, "index": index}
@@ -823,13 +991,13 @@ class Service:
         kb = self.knowledge(tenant)
         if not kb.drop_source("imports", import_id):
             raise ServiceError("no such import", 404)
-        index = kb.rebuild(list(load_profiles().values()))
+        index = kb.rebuild(list(self._ps(tenant).values()))
         self.ledger(tenant).append("knowledge", by, f"Imported knowledge taken out: {import_id}", data={"import": import_id, "entities": index["entities"]})
         return {"index": index}
 
     def _knowledge_changed(self, tenant: str, by: str, what: str, data: dict[str, Any]) -> dict[str, Any]:
         """Rebuild after the knowledge behind the graph was changed by a person, and put the change in the ledger."""
-        index = self.knowledge(tenant).rebuild(list(load_profiles().values()))
+        index = self.knowledge(tenant).rebuild(list(self._ps(tenant).values()))
         self.ledger(tenant).append("knowledge", by, what, data={**data, "entities": index["entities"], "relationships": index["triples"]})
         return index
 

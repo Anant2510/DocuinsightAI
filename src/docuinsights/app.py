@@ -80,6 +80,8 @@ def result(case: dict[str, Any]) -> dict[str, Any]:
             "triage": a.get("triage"), "screening": {k: (a.get("screening") or {}).get(k) for k in ("lists", "hits")} if a.get("screening") else None,
             "personal_data": [{k: c.get(k) for k in ("id", "name", "count")} for c in (a.get("privacy") or {}).get("categories") or []],
             "assigned": case.get("assigned"), "decision": case.get("decision"), "filed": case.get("filed"),
+            "rules": a.get("rulebook"),   # which version of the workspace's rules this assessment was made on
+            "systems": {sid: {k: ans.get(k) for k in ("status", "key", "connector", "demonstration", "reason", "record")} for sid, ans in (a.get("systems") or {}).items()},
             "spend": {**spend.totals(case), "model_off": spend.switch(case)}}
 
 
@@ -156,6 +158,28 @@ def create_app(service: Service | None = None, *, tenant_of: Callable[[Request],
 
     T, A = tenant, actor
 
+    def admin(r: Request) -> None:
+        """Who may change how the workspace is governed: its rules, its prices and limits, its knowledge and what it has learned. With
+        DOCUINSIGHTS_ADMIN_KEY set, such a change must carry that key as X-DocuInsights-Admin; a caseworker's key alone is refused. Without it,
+        anyone who may use the API may. Stopping is never held back: anyone may stop a case or pause the workspace; releasing the pause is governed."""
+        key = os.environ.get("DOCUINSIGHTS_ADMIN_KEY") or ""
+        if not key:
+            return
+        sent, address = r.headers.get("x-docuinsights-admin") or "", "admin:" + (r.client.host if r.client else "?")
+        wait = svc.key_attempts.wait(address)
+        if wait:   # the same patience as for the API key: an administrator key cannot be found by trying
+            raise ServiceError(f"Too many wrong administrator keys from this address. Try again in {int(wait // 60) + 1} minute(s).", 429)
+        if not hmac.compare_digest(sent.encode(), key.encode()):
+            if sent:
+                svc.key_attempts.wrong(address)
+            raise ServiceError("This change needs the administrator key. Ask whoever governs this workspace, or enter the key and try again.", 403)
+
+    def governed(fn: Any) -> Any:
+        def inner(r: Request, d: dict[str, Any]) -> Any:
+            admin(r)
+            return fn(r, d)
+        return inner
+
     def shown(r: Request, case: dict[str, Any]) -> dict[str, Any]:
         """The case as the workbench gets it, with its spend set against the workspace's limits and any stop still on its way to it."""
         out = view(case)
@@ -165,7 +189,8 @@ def create_app(service: Service | None = None, *, tenant_of: Callable[[Request],
     ref = lambda r: r.path_params["ref"]  # noqa: E731
 
     def config(r: Request) -> dict[str, Any]:
-        return {**svc.config(), "product": PRODUCT, "version": __version__, "auth": auth, "links": links or {}, "tenant": T(r), "actor": A(r)}
+        return {**svc.config(), "product": PRODUCT, "version": __version__, "auth": auth, "links": links or {}, "tenant": T(r), "actor": A(r),
+                "admin": "key" if os.environ.get("DOCUINSIGHTS_ADMIN_KEY") else "open"}
 
     def add_documents(r: Request, reference: str, documents: list[Any], replaces: str | None = None) -> int:
         n = 0
@@ -262,6 +287,29 @@ def create_app(service: Service | None = None, *, tenant_of: Callable[[Request],
         return HTMLResponse(svc.record(T(r), ref(r), masked=masked, by=A(r)), headers={"cache-control": "no-store", "x-content-type-options": "nosniff",
                                                                                          "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"})
 
+    def rules_sheet(r: Request) -> Response:
+        pid = r.path_params["profile"]
+        return Response(svc.rules_template(T(r), pid), media_type="text/csv; charset=utf-8", headers={"content-disposition": f'attachment; filename="rules-{svc.rules(T(r), pid)["profile"]}.csv"',
+                                                                                                    "x-content-type-options": "nosniff", "cache-control": "no-store"})
+
+    def rules_book(r: Request) -> Response:
+        pid = r.path_params["profile"]
+        return Response(svc.rules_workbook(T(r), pid), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        headers={"content-disposition": f'attachment; filename="rules-{svc.rules(T(r), pid)["profile"]}.xlsx"', "x-content-type-options": "nosniff", "cache-control": "no-store"})
+
+    def rules_import(r: Request, d: dict[str, Any]) -> Any:
+        """A filled-in sheet: {"text": the sheet as text} or {"content_base64": the workbook or the text file}; with "apply": true the changes are made."""
+        apply = d.get("apply") is True
+        if apply:
+            admin(r)
+        sheet: Any = str(d.get("text") or "")
+        if d.get("content_base64"):
+            try:
+                sheet = base64.b64decode(str(d["content_base64"]).split(",")[-1], validate=False)
+            except Exception as exc:
+                raise ServiceError("content_base64 is not valid base64") from exc
+        return svc.import_rules(T(r), r.path_params["profile"], sheet, by=A(r), apply=apply)
+
     def cases_csv(r: Request) -> Response:
         return Response(svc.cases_csv(T(r)), media_type="text/csv; charset=utf-8", headers={"content-disposition": 'attachment; filename="docuinsights-cases.csv"', "x-content-type-options": "nosniff",
                                                                                            "cache-control": "no-store"})
@@ -302,28 +350,36 @@ def create_app(service: Service | None = None, *, tenant_of: Callable[[Request],
         Route("/api/cases/{ref}/stop", api(lambda r, d: shown(r, svc.stop(T(r), ref(r), str(d.get("mode") or "model"), by=A(r), note=str(d.get("note") or ""))), body=True), methods=["POST"]),
         Route("/api/cases/{ref}/resume", api(lambda r, d: shown(r, svc.resume(T(r), ref(r), by=A(r))), body=True), methods=["POST"]),
         Route("/api/spend", api(lambda r: svc.spend(T(r)))),
-        Route("/api/spend", api(lambda r, d: svc.set_spend(T(r), d, by=A(r)), body=True), methods=["POST"]),
+        Route("/api/spend", api(lambda r, d: (None if d.get("paused") and set(d) <= {"paused", "note"} else admin(r), svc.set_spend(T(r), d, by=A(r)))[1], body=True), methods=["POST"]),
         Route("/api/observability", api(lambda r: svc.observability(T(r)))),
+        Route("/api/rules/{profile}", api(lambda r: svc.rules(T(r), r.path_params["profile"]))),
+        Route("/api/rules/{profile}", api(governed(lambda r, d: svc.change_rules(T(r), r.path_params["profile"], d.get("changes") if isinstance(d.get("changes"), list) else d, by=A(r))), body=True), methods=["POST"]),
+        Route("/api/rules/{profile}/test", api(lambda r, d: svc.test_rule(T(r), r.path_params["profile"], d.get("rule") or {}, str(d.get("case") or "")), body=True), methods=["POST"]),
+        Route("/api/rules/{profile}/template.csv", api(rules_sheet)),
+        Route("/api/rules/{profile}/template.xlsx", api(rules_book)),
+        Route("/api/rules/{profile}/import", api(rules_import, body=True), methods=["POST"]),
+        Route("/api/connectors", api(lambda r: svc.connectors(T(r)))),
+        Route("/api/connectors/test", api(lambda r, d: svc.test_connector(T(r), str(d.get("profile") or ""), str(d.get("system") or ""), str(d.get("key") or ""), by=A(r)), body=True), methods=["POST"]),
         Route("/api/insights", api(lambda r: svc.insights(T(r)))),
         Route("/api/export/cases.csv", api(cases_csv)),
         Route("/api/feedback/{profile}", api(lambda r: svc.feedback(T(r), r.path_params["profile"]))),
-        Route("/api/feedback/{profile}/{id}", api(lambda r, d: svc.decide_proposal(T(r), r.path_params["profile"], r.path_params["id"], str(d.get("decision") or ""), by=A(r),
-                                                                                    accept_changes=bool(d.get("accept_changes"))), body=True), methods=["POST"]),
+        Route("/api/feedback/{profile}/{id}", api(governed(lambda r, d: svc.decide_proposal(T(r), r.path_params["profile"], r.path_params["id"], str(d.get("decision") or ""), by=A(r),
+                                                                                    accept_changes=bool(d.get("accept_changes")))), body=True), methods=["POST"]),
         Route("/api/knowledge", api(lambda r: svc.knowledge_overview(T(r)))),
         Route("/api/knowledge/graph", api(k_graph)),
         Route("/api/knowledge/map", api(k_map)),
         Route("/api/knowledge/entity", api(lambda r: svc.knowledge_ready(T(r)).entity(r.query_params.get("id") or ""))),
         Route("/api/knowledge/trail", api(lambda r: svc.knowledge_ready(T(r)).way_to(r.query_params.get("id") or ""))),
         Route("/api/knowledge/search", api(lambda r: svc.knowledge_ready(T(r)).search(r.query_params.get("q") or ""))),
-        Route("/api/knowledge/bases/{id}", api(lambda r, d: svc.knowledge_switch(T(r), r.path_params["id"], bool(d.get("on")), by=A(r)), body=True), methods=["POST"]),
-        Route("/api/knowledge/facts", api(k_fact, body=True), methods=["POST"]),
-        Route("/api/knowledge/facts/{id}/remove", api(lambda r, d: svc.knowledge_fact_remove(T(r), r.path_params["id"], by=A(r)), body=True), methods=["POST"]),
-        Route("/api/knowledge/imports/{id}/place", api(lambda r, d: svc.knowledge_place(T(r), r.path_params["id"], str(d.get("level") or ""), by=A(r)), body=True), methods=["POST"]),
-        Route("/api/knowledge/imports/{id}/restore", api(lambda r, d: svc.knowledge_restore(T(r), r.path_params["id"], by=A(r)), body=True), methods=["POST"]),
+        Route("/api/knowledge/bases/{id}", api(governed(lambda r, d: svc.knowledge_switch(T(r), r.path_params["id"], bool(d.get("on")), by=A(r))), body=True), methods=["POST"]),
+        Route("/api/knowledge/facts", api(governed(k_fact), body=True), methods=["POST"]),
+        Route("/api/knowledge/facts/{id}/remove", api(governed(lambda r, d: svc.knowledge_fact_remove(T(r), r.path_params["id"], by=A(r))), body=True), methods=["POST"]),
+        Route("/api/knowledge/imports/{id}/place", api(governed(lambda r, d: svc.knowledge_place(T(r), r.path_params["id"], str(d.get("level") or ""), by=A(r))), body=True), methods=["POST"]),
+        Route("/api/knowledge/imports/{id}/restore", api(governed(lambda r, d: svc.knowledge_restore(T(r), r.path_params["id"], by=A(r))), body=True), methods=["POST"]),
         Route("/api/cases/{ref}/knowledge", api(lambda r: svc.case_knowledge(T(r), ref(r)))),
         Route("/api/knowledge/export", api(k_export)),
-        Route("/api/knowledge/imports", api(k_import, body=True), methods=["POST"]),
-        Route("/api/knowledge/imports/{id}/remove", api(lambda r, d: svc.knowledge_remove(T(r), r.path_params["id"], by=A(r)), body=True), methods=["POST"]),
+        Route("/api/knowledge/imports", api(governed(k_import), body=True), methods=["POST"]),
+        Route("/api/knowledge/imports/{id}/remove", api(governed(lambda r, d: svc.knowledge_remove(T(r), r.path_params["id"], by=A(r))), body=True), methods=["POST"]),
         Route("/api/knowledge/rebuild", api(k_rebuild, body=True), methods=["POST"]),
         Route("/api/platform", api(lambda r: svc.platform(T(r)))),
         Route("/api/ledger", api(lambda r: {"verify": svc.ledger(T(r)).verify(), "entries": svc.ledger(T(r)).entries(case=r.query_params.get("case") or None, limit=min(500, int(r.query_params.get("limit") or 100)))})),
@@ -332,11 +388,15 @@ def create_app(service: Service | None = None, *, tenant_of: Callable[[Request],
         Route("/api/v1/cases", api(v1_submit, body=True), methods=["POST"]),
         Route("/api/v1/cases/{ref}", api(lambda r: result(svc.case(T(r), ref(r))))),
         Route("/api/v1/cases/{ref}/record", api(record)),
+        Route("/api/v1/cases/{ref}/decision", api(lambda r, d: result(svc.decide(T(r), ref(r), str(d.get("decision") or ""), str(d.get("note") or ""), by=A(r))), body=True), methods=["POST"]),
         Route("/api/v1/cases/{ref}/spend", api(lambda r: spend.summary(svc.case(T(r), ref(r)), svc.spend_settings(T(r)).read()))),
         Route("/api/v1/cases/{ref}/stop", api(lambda r, d: result(svc.stop(T(r), ref(r), str(d.get("mode") or "model"), by=A(r), note=str(d.get("note") or ""))), body=True), methods=["POST"]),
         Route("/api/v1/cases/{ref}/resume", api(lambda r, d: result(svc.resume(T(r), ref(r), by=A(r))), body=True), methods=["POST"]),
         Route("/api/v1/spend", api(lambda r: svc.spend(T(r)))),
         Route("/api/v1/observability", api(lambda r: svc.observability(T(r)))),
+        Route("/api/v1/rules/{profile}", api(lambda r: svc.rules(T(r), r.path_params["profile"]))),
+        Route("/api/v1/rules/{profile}", api(governed(lambda r, d: svc.change_rules(T(r), r.path_params["profile"], d.get("changes") if isinstance(d.get("changes"), list) else d, by=A(r))), body=True), methods=["POST"]),
+        Route("/api/v1/connectors", api(lambda r: svc.connectors(T(r)))),
         Route("/api/v1/insights", api(lambda r: svc.insights(T(r)))),
         Route("/api/v1/cases/{ref}/ask", api(lambda r, d: svc.ask(T(r), ref(r), str(d.get("question") or "")), body=True), methods=["POST"]),
         Route("/api/v1/health", api(lambda r: {"product": PRODUCT, "version": __version__, "model": svc.config()["model"], "repository": svc.repository.status()})),

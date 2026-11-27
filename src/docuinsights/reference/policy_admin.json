@@ -1,0 +1,84 @@
+{
+ "name": "Demonstration policy administration",
+ "note": "Invented policies, people and insurers for demonstration. Not a system of record. Point the connector at your own policy administration system to replace it.",
+ "regions": {
+  "US": "United States",
+  "IN": "India",
+  "GB": "United Kingdom"
+ },
+ "records": {
+  "PA-US-7730145": {
+   "region": "US",
+   "status": "in force",
+   "product": "Personal auto, collision and comprehensive",
+   "policyholder": "Jordan Ellery",
+   "insurer": "Cedar Ridge Mutual Insurance Company",
+   "vehicle": "5XYZT3LB8MG004417",
+   "cover_start": "2026-01-15",
+   "cover_end": "2027-01-14",
+   "sum_insured": "USD 28,000.00",
+   "excess": "USD 500.00",
+   "state": "TX",
+   "premium_paid_to": "2027-01-14"
+  },
+  "PA-US-7730688": {
+   "region": "US",
+   "status": "cancelled",
+   "product": "Personal auto, liability only",
+   "policyholder": "Rowan Castellan",
+   "insurer": "Cedar Ridge Mutual Insurance Company",
+   "vehicle": "3KPF24AD6NE118230",
+   "cover_start": "2026-02-01",
+   "cover_end": "2027-01-31",
+   "sum_insured": "USD 15,000.00",
+   "excess": "USD 1,000.00",
+   "state": "OH",
+   "premium_paid_to": "2026-05-31",
+   "status_since": "2026-06-01",
+   "status_reason": "Cancelled for non-payment of premium"
+  },
+  "PA-IN-2201987": {
+   "region": "IN",
+   "status": "in force",
+   "product": "Private car package policy",
+   "policyholder": "Meera Krishnan",
+   "insurer": "Sahyadri General Insurance Company Limited",
+   "vehicle": "KA 05 MN 4821",
+   "cover_start": "2026-04-01",
+   "cover_end": "2027-03-31",
+   "sum_insured": "INR 625,000.00",
+   "excess": "INR 2,000.00",
+   "state": "KA",
+   "premium_paid_to": "2027-03-31"
+  },
+  "PA-IN-2203310": {
+   "region": "IN",
+   "status": "lapsed",
+   "product": "Private car package policy",
+   "policyholder": "Arvind Subramanian",
+   "insurer": "Sahyadri General Insurance Company Limited",
+   "vehicle": "TN 09 CK 7715",
+   "cover_start": "2025-09-12",
+   "cover_end": "2026-09-11",
+   "sum_insured": "INR 480,000.00",
+   "excess": "INR 1,000.00",
+   "state": "TN",
+   "premium_paid_to": "2026-03-11",
+   "status_since": "2026-03-12",
+   "status_reason": "Lapsed: the second instalment of premium was not received"
+  },
+  "MMI-MTR-4471902": {
+   "region": "GB",
+   "status": "in force",
+   "product": "Motor, comprehensive",
+   "policyholder": "Elena Marsh",
+   "insurer": "Marlowe Mutual Insurance plc",
+   "vehicle": "KV21 RMO",
+   "cover_start": "2025-10-01",
+   "cover_end": "2026-09-30",
+   "sum_insured": "GBP 14,500.00",
+   "excess": "GBP 350.00",
+   "premium_paid_to": "2026-09-30"
+  }
+ }
+}

@@ -34,6 +34,7 @@ class Profile:
         self.evidence: list[dict[str, Any]] = raw.get("evidence") or []
         self.references: list[dict[str, Any]] = raw.get("reference_sources") or []
         self.rules: list[dict[str, Any]] = raw.get("rules") or []
+        self.systems: list[dict[str, Any]] = raw.get("systems") or []   # the systems of record this use case checks against (systems.py)
         self.consistency: list[dict[str, Any]] = raw.get("consistency") or []
         self.outcomes: dict[str, Any] = raw.get("outcomes") or {}
         self.counterfactuals: list[dict[str, Any]] = raw.get("counterfactuals") or []
@@ -70,14 +71,18 @@ class Profile:
             unknown = [t for t in ev.get("any_of") or [] if t not in known]
             if unknown:
                 raise ProfileError(f"{self.id}: evidence '{ev.get('id')}' names unknown document type(s) {unknown}")
+        for sysd in self.systems:
+            if not sysd.get("id") or not str(sysd["id"]).replace("_", "").isalnum():
+                raise ProfileError(f"{self.id}: a system of record needs an id of letters, digits and underscores")
+            if not self.knows(sysd.get("key") or ""):
+                raise ProfileError(f"{self.id}: system '{sysd['id']}' is looked up by unknown field '{sysd.get('key')}'")
+            for f in sysd.get("fields") or []:
+                if f.get("type", "text") not in FIELD_TYPES:
+                    raise ProfileError(f"{self.id}: system field {sysd['id']}.{f.get('id')} has unknown type '{f.get('type')}'")
         for group in (self.rules, self.consistency):
             for r in group:
-                for ref in _refs_of(r):
-                    head, _, fld = ref.partition(".")
-                    if head == "case":
-                        continue
-                    if head not in known or fld not in {f["id"] for f in self.types[head].get("fields") or []}:
-                        raise ProfileError(f"{self.id}: rule '{r.get('id')}' refers to unknown field '{ref}'")
+                for problem in self.rule_problems(r):
+                    raise ProfileError(f"{self.id}: {problem}")
         from . import assurance   # imported here: it reads profiles
 
         wrong = assurance.check_profile(self)
@@ -93,8 +98,68 @@ class Profile:
                 return f
         return None
 
+    def spec_of(self, ref: str) -> dict[str, Any] | None:
+        """The declaration of the field a rule names (`type.field`, `case.field` or `record.system.field`), or None when there is none."""
+        head, _, fld = str(ref or "").partition(".")
+        if head == "case":
+            return next((f for f in self.case.get("fields") or [] if f["id"] == fld), None)
+        if head == "record":
+            sid, _, name = fld.partition(".")
+            sysd = next((x for x in self.systems if x["id"] == sid), None) or {}
+            return next((f for f in sysd.get("fields") or [] if f["id"] == name), None)
+        return next((f for f in (self.types.get(head) or {}).get("fields") or [] if f["id"] == fld), None)
+
+    def knows(self, ref: str) -> bool:
+        return self.spec_of(ref) is not None
+
+    def rule_problems(self, r: dict[str, Any]) -> list[str]:
+        """What is wrong with one rule or consistency check, in words (an empty list when nothing is)."""
+        rid, kind = r.get("id"), r.get("type")
+        bad = [f"rule '{rid}' refers to unknown field '{ref}'" for ref in _refs_of(r) if not self.knows(ref)]
+        if "kind" in r and not kind:   # a consistency check: its fields are all it names
+            return bad
+        if kind not in RULE_TYPES:
+            return [f"rule '{rid}' has unknown type '{kind}' (known: {', '.join(sorted(RULE_TYPES))})"]
+        missing = [k for k in RULE_TYPES[kind] if r.get(k) in (None, "", [])]
+        if missing:
+            bad.append(f"rule '{rid}' ({kind}) needs {', '.join(missing)}")
+
+        def is_type(ref: Any, *types: str) -> bool:
+            return (self.spec_of(str(ref)) or {}).get("type", "text") in types
+
+        if kind in ("date_order", "date_interval"):
+            a, b = (r.get("first"), r.get("then")) if kind == "date_order" else (r.get("from"), r.get("to"))
+            bad += [f"rule '{rid}': '{x}' is not a date" for x in (a, b) if x and self.knows(x) and not is_type(x, "date")]
+            if kind == "date_interval" and not _is_number(r.get("max_days"), whole=True):
+                bad.append(f"rule '{rid}': max_days must be a whole number of days, zero or more")
+        if kind in ("amount_limit", "amounts_match"):
+            refs = [r.get("amount"), r.get("limit")] if kind == "amount_limit" else list(r.get("amounts") or [])
+            bad += [f"rule '{rid}': '{x}' is not an amount" for x in refs if x and self.knows(x) and not is_type(x, "money", "number")]
+            if kind == "amounts_match" and len(refs) < 2:
+                bad.append(f"rule '{rid}': name at least two amounts to compare")
+            if r.get("tolerance_pct") not in (None, "") and not _is_number(r.get("tolerance_pct")):
+                bad.append(f"rule '{rid}': the tolerance is a percentage, zero or more")
+        if kind == "value_limit":
+            if r.get("field") and self.knows(r["field"]) and not is_type(r["field"], "money", "number"):
+                bad.append(f"rule '{rid}': '{r['field']}' is not an amount or a number")
+            if r.get("max") in (None, "") and r.get("min") in (None, ""):
+                bad.append(f"rule '{rid}': give a most, a least, or both")
+            bad += [f"rule '{rid}': {k} must be a number" for k in ("max", "min") if r.get(k) not in (None, "") and not _is_number(r.get(k))]
+        if kind == "value_in" and (not isinstance(r.get("values"), list) or not all(str(v).strip() for v in r.get("values") or [])):
+            bad.append(f"rule '{rid}': give the values as a list")
+        when = r.get("applies_when")
+        if when is not None and (not isinstance(when, dict) or not self.knows(when.get("ref") or "") or not (when.get("is") or when.get("in") or when.get("not_in"))
+                                 or any(not isinstance(when.get(k) or [], list) for k in ("in", "not_in"))):
+            bad.append(f"rule '{rid}': 'applies when' names a known field and the value or values it must have (is, in) or must not have (not_in)")
+        return bad
+
     def field_name(self, ref: str) -> str:
         head, _, fld = ref.partition(".")
+        if head == "record":
+            sid, _, name = fld.partition(".")
+            spec = next((s for s in self.systems if s["id"] == sid), None) or {}
+            f = next((x for x in spec.get("fields") or [] if x["id"] == name), None) or {}
+            return f"{spec.get('name') or sid} · {f.get('name') or name.replace('_', ' ')}"
         if head == "case":
             for f in self.case.get("fields") or []:
                 if f["id"] == fld:
@@ -123,9 +188,22 @@ class Profile:
         return [{"key": r["key"], "title": r["title"], "kind": r["kind"], "family": r["family"]} for r in assurance.declared_rules(self)]
 
 
+# What a rule of each kind must state. Every kind is a fixed calculation in checks.policy: a rule is a choice of kind, fields and limits, never code.
+RULE_TYPES = {"date_order": ("first", "then"), "date_interval": ("from", "to", "max_days"), "amount_limit": ("amount", "limit"), "amounts_match": ("amounts",),
+              "codes_consistent": ("codes",), "value_in": ("field", "values"), "value_limit": ("field",), "required_field": ("field",)}
+
+
+def _is_number(v: Any, whole: bool = False) -> bool:
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        return False
+    return n == n and 0 <= n < 1e15 and (not whole or n == int(n))
+
+
 def _refs_of(rule: dict[str, Any]) -> list[str]:
     out: list[str] = []
-    for key in ("from", "to", "first", "then", "amount", "limit"):
+    for key in ("from", "to", "first", "then", "amount", "limit", "field"):
         v = rule.get(key)
         if isinstance(v, str) and "." in v and " " not in v:
             out.append(v)

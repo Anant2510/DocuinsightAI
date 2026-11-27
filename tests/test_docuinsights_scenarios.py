@@ -43,7 +43,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from docuinsights import assurance as A, pipeline as P, reader, reports, values as V  # noqa: E402
-from docuinsights import spend as SP  # noqa: E402
+from docuinsights import rulebook as RB, spend as SP, systems as SYS  # noqa: E402
 from docuinsights.ledger import Ledger  # noqa: E402
 from docuinsights.model import BaseModel_, ModelError  # noqa: E402
 from docuinsights.profiles import Profile, ProfileError, get_profile, load_profiles  # noqa: E402
@@ -1193,6 +1193,7 @@ def live(tmp_path, monkeypatch):
             except ValueError:
                 return err.code, text
 
+    call.base = f"http://127.0.0.1:{port}"
     yield call, service
     server.should_exit = True
     thread.join(timeout=5)
@@ -1586,3 +1587,636 @@ def test_observability_counts_what_the_agents_did_and_what_it_cost(tmp_path):
     for _ in range(40):
         SP.record(big, "extract", [{"model": "claude-sonnet-5-5", "step": "extract", "input_tokens": 10, "output_tokens": 1, "ms": 5}] * 10, ["D1"], svc.spend_settings(T).read())
     assert len(big["spend"]["log"]) == SP.LOG and SP.totals(big)["calls"] == SP.totals(cases[0])["calls"] + 400
+
+
+# ================================================================================================ 13. a business's own rules, and the systems of record they are run against
+P_INS = "insurance_claim"
+OWN_RULE = {"id": "senior_review_above_40000", "title": "A claim above INR 40,000 goes to a senior handler", "type": "value_limit", "field": "claim_form.claimed_amount", "max": 40000, "currency": "INR",
+            "applies_when": {"ref": "record.policy_admin.region", "is": "IN"}, "note": "Claims authority matrix, section 2"}
+
+
+def test_the_record_decides_what_the_documents_cannot_in_two_regions(svc):
+    seen = {}
+    for sid in ("us_clean", "india_clean", "india_lapsed", "clean"):
+        case = svc.assess(T, svc.load_sample(T, P_INS, sid)["reference"])
+        assert_holds(svc, case)
+        seen[sid] = case
+        rec = case["assessment"]["systems"]["policy_admin"]
+        assert rec["status"] == "found" and rec["connector"] == "synthetic" and rec["demonstration"] is True and statuses(case)["REC-policy_admin"] == "pass"
+        assert "demonstration data" in next(f["message"] for f in case["assessment"]["findings"] if f["id"] == "REC-policy_admin"), "invented records are never passed off as a system of record"
+    us, india, lapsed = seen["us_clean"], seen["india_clean"], seen["india_lapsed"]
+    assert us["assessment"]["recommendation"]["outcome"] == india["assessment"]["recommendation"]["outcome"] == "proceed"
+    assert statuses(us)["RULE-notified_in_time_us"] == "pass" and statuses(us)["RULE-notified_in_time_in"] == "info" and statuses(india)["RULE-notified_in_time_in"] == "pass" and statuses(india)["RULE-notified_in_time_us"] == "info"
+    money = {sid: next(f for f in c["assessment"]["findings"] if f["id"] == "RULE-within_recorded_sum_insured")["message"] for sid, c in seen.items()}
+    assert "USD 3,480.00" in money["us_clean"] and "USD 28,000.00" in money["us_clean"] and "INR 48,600.00" in money["india_clean"] and "INR 625,000.00" in money["india_clean"]
+    # every document of the lapsed case agrees with every other: only the record shows the policy lapsed and the premium unpaid
+    assert lapsed["assessment"]["recommendation"]["outcome"] == "review" and statuses(lapsed)["RULE-policy_in_force"] == "fail" and statuses(lapsed)["RULE-loss_while_premium_paid"] == "fail"
+    assert statuses(lapsed)["RULE-loss_before_cover_end"] == "pass" and all(v != "fail" for k, v in statuses(lapsed).items() if k.startswith("CON-")), "the schedule the claimant sent still looks valid"
+    assert "lapsed" in next(f["message"] for f in lapsed["assessment"]["findings"] if f["id"] == "RULE-policy_in_force")
+    lookups = [e for e in svc.ledger(T).entries(limit=500) if e["kind"] == "system"]
+    assert len(lookups) == 4 and all("found" in e["summary"] for e in lookups) and svc.ledger(T).verify()["ok"]
+    # a policy the system does not hold, a claim form with no policy number, and a rule finding that carries the rule as it stood
+    fields, docs = package(P_INS, "india_clean", as_text=True)
+    unknown = run(svc, P_INS, fields, [(n, d.replace(b"PA-IN-2201987", b"PA-IN-9999999"), c) for n, d, c in docs], "REC-UNKNOWN")
+    assert statuses(unknown)["REC-policy_admin"] == "fail" and statuses(unknown)["RULE-policy_in_force"] == "review" and unknown["assessment"]["recommendation"]["outcome"] != "proceed"
+    assert_holds(svc, unknown)
+    nokey = run(svc, P_INS, fields, [(n, d.replace(b"Policy Number", b"Reference"), c) for n, d, c in docs], "REC-NOKEY")
+    assert statuses(nokey)["REC-policy_admin"] == "review" and "nothing to look" in " ".join(next(f for f in nokey["assessment"]["findings"] if f["id"] == "REC-policy_admin")["reasoning"])
+    rule = next(f for f in india["assessment"]["findings"] if f["id"] == "RULE-notified_in_time_in")["rule"]
+    assert rule["version"] == "1.0" and rule["params"]["max_days"] == 7 and rule["params"]["applies_when"] == {"ref": "record.policy_admin.region", "is": "IN"}
+
+
+def test_a_region_nobody_wrote_a_rule_for_is_still_checked(svc, monkeypatch):
+    """Regional rules leave a gap unless one rule covers "everywhere else". The general notification rule applies wherever no regional one does,
+    so a policy from a region that was never thought of is not waved through unchecked."""
+    general = next(r for r in svc.rules(T, P_INS)["rules"] if r["id"] == "notified_in_time")
+    assert general["rule"]["applies_when"] == {"ref": "record.policy_admin.region", "not_in": ["US", "IN"]} and general["says"].endswith("(when Policy administration · Region is none of US, IN).")
+    real = SYS._synthetic
+
+    def elsewhere(path):
+        data = json.loads(json.dumps(real(path)))
+        data["records"]["PA-US-7730145"]["region"] = "AE"
+        return data
+
+    monkeypatch.setattr(SYS, "_synthetic", elsewhere)
+    ref = svc.load_sample(T, P_INS, "us_clean")["reference"]
+    case = svc.assess(T, ref)
+    st = statuses(case)
+    assert (st["RULE-notified_in_time_us"], st["RULE-notified_in_time_in"], st["RULE-notified_in_time"]) == ("info", "info", "pass")
+    svc.change_rules(T, P_INS, {"do": "set", "rule": {"id": "notified_in_time", "max_days": 1}, "note": "Tighter"})
+    late = svc.assess(T, ref)
+    assert statuses(late)["RULE-notified_in_time"] == "fail" and late["assessment"]["recommendation"]["outcome"] == "review"
+    assert_holds(svc, late)
+    monkeypatch.setattr(SYS, "_synthetic", real)
+    for sample, which in (("us_clean", "RULE-notified_in_time_us"), ("india_clean", "RULE-notified_in_time_in")):   # where a regional rule applies, the general one stands aside
+        st = statuses(svc.assess(T, svc.load_sample(T, P_INS, sample)["reference"]))
+        assert st[which] == "pass" and st["RULE-notified_in_time"] == "info", (sample, st)
+    # "everywhere but" goes through the sheet and the form as it goes through the file
+    row = next(line for line in svc.rules_template(T, P_INS).splitlines() if line.startswith("notified_in_time,"))
+    assert ",record.policy_admin.region,not: US; IN," in row
+    svc.change_rules(T, P_INS, {"do": "set", "rule": {"id": "notified_in_time", "applies_when": {"ref": "record.policy_admin.region", "not_in": "US; IN; AE"}}, "note": "AE has its own"})
+    assert next(r for r in svc.rules(T, P_INS)["rules"] if r["id"] == "notified_in_time")["rule"]["applies_when"]["not_in"] == ["US", "IN", "AE"]
+    assert svc.import_rules(T, P_INS, svc.rules_workbook(T, P_INS))["changes"] == 0
+    for bad in ({"ref": "record.policy_admin.region"}, {"ref": "record.policy_admin.region", "not_in": []}, {"ref": "case.nope", "not_in": ["US"]}):
+        with pytest.raises(ServiceError):
+            svc.change_rules(T, P_INS, {"do": "set", "rule": {"id": "notified_in_time", "applies_when": bad}})
+
+
+def test_a_system_that_does_not_answer_is_never_read_as_no_record(svc, tmp_path, monkeypatch):
+    import http.server
+    import threading as th
+
+    hits = []
+
+    class Policies(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):   # noqa: N802
+            hits.append((self.path, self.headers.get("Authorization"), self.headers.get("X-Team")))
+            key = self.path.rsplit("/", 1)[-1]
+            if key == "PA-IN-2201987":
+                body, code = json.dumps({"policy": {"state": "IN FORCE", "holder": {"name": "Meera Krishnan"}}, "validTo": "2027-03-31", "validFrom": "2026-04-01", "paidTo": "2027-03-31", "limit": "INR 625,000.00",
+                                         "market": "IN", "plate": "KA 05 MN 4821"}).encode(), 200
+            elif key == "BROKEN":
+                body, code = b"<html>gateway error</html>", 200
+            elif key == "DOWN":
+                body, code = b"{}", 503
+            else:
+                body, code = b'{"error": "no such policy"}', 404
+            self.send_response(code)
+            self.send_header("content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Policies)
+    th.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{server.server_address[1]}/policies/{{key}}"
+        sysd = next(s for s in get_profile(P_INS).systems if s["id"] == "policy_admin")
+        monkeypatch.setenv("DOCUINSIGHTS_SYSTEM_POLICY_ADMIN_URL", base)
+        monkeypatch.setenv("DOCUINSIGHTS_SYSTEM_POLICY_ADMIN_TOKEN", "s3cret-token")
+        monkeypatch.setenv("DOCUINSIGHTS_SYSTEM_POLICY_ADMIN_HEADERS", json.dumps({"X-Team": "claims"}))
+        monkeypatch.setenv("DOCUINSIGHTS_SYSTEM_POLICY_ADMIN_MAP", json.dumps({"status": "policy.state", "policyholder": "policy.holder.name", "cover_end": "validTo", "cover_start": "validFrom",
+                                                                               "premium_paid_to": "paidTo", "sum_insured": "limit", "region": "market", "vehicle": "plate"}))
+        how = SYS.connector_of(sysd)
+        assert how["kind"] == "http" and how["authenticated"] and how["demonstration"] is False and "s3cret" not in json.dumps(how) and "s3cret" not in json.dumps(svc.connectors(T)), "a connector's secret is never shown"
+        live = SYS.lookup(sysd, "PA-IN-2201987")
+        assert live["status"] == "found" and live["record"]["status"] == "IN FORCE" and live["record"]["policyholder"] == "Meera Krishnan" and live["record"]["sum_insured"] == "INR 625,000.00"
+        assert hits[-1] == ("/policies/PA-IN-2201987", "Bearer s3cret-token", "claims")
+        case = svc.assess(T, svc.load_sample(T, P_INS, "india_clean")["reference"])   # the same case, now against the customer's own system: its field names, its spelling of "in force"
+        assert case["assessment"]["systems"]["policy_admin"]["connector"] == "http" and case["assessment"]["recommendation"]["outcome"] == "proceed" and statuses(case)["RULE-policy_in_force"] == "pass"
+        assert "demonstration" not in next(f["message"] for f in case["assessment"]["findings"] if f["id"] == "REC-policy_admin")
+        assert_holds(svc, case)
+        assert SYS.lookup(sysd, "PA-IN-0000000")["status"] == "not_found" and SYS.lookup(sysd, "a/b c")["status"] == "not_found" and hits[-1][0] == "/policies/a%2Fb%20c", "the key is sent as one path segment"
+        for key in ("BROKEN", "DOWN"):
+            assert SYS.lookup(sysd, key)["status"] == "unavailable"
+        assert SYS.lookup(sysd, "")["status"] == "not_asked"
+        # the system is down while a case is assessed: unavailable, a person is asked, and nothing is concluded from the silence
+        server.shutdown()
+        server.server_close()
+        down = svc.assess(T, svc.load_sample(T, P_INS, "us_clean")["reference"])
+        f = next(x for x in down["assessment"]["findings"] if x["id"] == "REC-policy_admin")
+        assert f["status"] == "review" and "could not be asked" in f["message"] and "not a record that does not exist" in " ".join(f["reasoning"])
+        assert statuses(down)["RULE-policy_in_force"] == "review" and down["assessment"]["recommendation"]["outcome"] != "proceed" and down["assessment"]["systems"]["policy_admin"]["status"] == "unavailable"
+        assert_holds(svc, down)
+        for name, value in (("URL", "ftp://example.org/{key}"), ("HEADERS", "{not json")):
+            monkeypatch.setenv("DOCUINSIGHTS_SYSTEM_POLICY_ADMIN_" + name, value)
+            assert SYS.lookup(sysd, "X-1")["status"] == "unavailable"
+        monkeypatch.delenv("DOCUINSIGHTS_SYSTEM_POLICY_ADMIN_URL")
+        monkeypatch.setenv("DOCUINSIGHTS_SYNTHETIC_SYSTEMS", "0")   # an installation that will not run on invented records
+        assert SYS.connector_of(sysd)["kind"] == "none" and SYS.lookup(sysd, "PA-IN-2201987")["status"] == "not_configured"
+    finally:
+        try:
+            server.shutdown()
+        except Exception:   # noqa: BLE001
+            pass
+
+
+def test_a_customers_system_is_connected_by_settings_or_by_an_adapter(svc, tmp_path, monkeypatch):
+    """The customer's real system rarely answers a plain GET. It may want a POST, wrap its answer, say "no such record" with a 200, return rows,
+    or need code of its own. Each is reached without touching the engine, and each tells "no record" from "no answer" the same way."""
+    import http.server
+    import threading as th
+
+    seen: list[dict] = []
+    in_force = {"policyStatus": "in force", "policyHolder": "Jordan Ellery", "expiry": "2026-12-31", "inception": "2026-01-01", "paidTo": "2026-12-31", "cover": "USD 28,000.00", "country": "US",
+                "vin": "5XYZT3LB8MG004417"}
+
+    class Core(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):   # noqa: N802
+            sent = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
+            seen.append({"path": self.path, "body": sent, "type": self.headers.get("content-type")})
+            if self.path == "/search":   # a search service: rows under data.rows, and an empty list when there is none
+                key = (sent.get("query") or {}).get("policyNo")
+                out = {"result": {"code": "OK"}, "data": {"rows": [in_force] if key == "PA-US-7730145" else []}}
+                out = {"result": {"code": "BUSY", "text": "try later"}} if key == "BUSY" else out
+            elif self.path == "/envelope":   # the status lives inside a 200
+                key = sent.get("policyNo")
+                out = {"status": {"code": "E404"}} if key == "PA-US-0000000" else {"status": {"code": "S000"}, "policy": in_force}
+            else:   # the style of the reference adapter: one named request object, one named response object, its own status
+                ask = sent.get("GetPolicyRequest") or {}
+                key = ask.get("policyNumber")
+                seen[-1]["creds"] = (ask.get("cabinetName"), ask.get("userName"), ask.get("userPassword"), ask.get("locale"))
+                out = {"GetPolicyResponse": {"status": "0", "message": "ok", "policy": in_force} if key == "PA-US-7730145"
+                       else {"status": "-50023", "message": "no such policy"} if key == "PA-US-0000000" else {"status": "-1", "message": "cabinet is locked"}}
+            body = json.dumps(out).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Core)
+    th.Thread(target=server.serve_forever, daemon=True).start()
+    sysd = next(x for x in get_profile(P_INS).systems if x["id"] == "policy_admin")
+    here = f"http://127.0.0.1:{server.server_address[1]}"
+    fields = {"status": "policyStatus", "policyholder": "policyHolder", "cover_end": "expiry", "cover_start": "inception", "premium_paid_to": "paidTo", "sum_insured": "cover", "region": "country", "vehicle": "vin"}
+
+    def setting(**kw):
+        for name in SYS.SETTINGS + ("REQUEST", "RESPONSE", "KEY_FIELD", "CABINET", "USER", "PASSWORD", "EXTRA"):
+            monkeypatch.delenv("DOCUINSIGHTS_SYSTEM_POLICY_ADMIN_" + name, raising=False)
+        for name, value in kw.items():
+            monkeypatch.setenv("DOCUINSIGHTS_SYSTEM_POLICY_ADMIN_" + name, value if isinstance(value, str) else json.dumps(value))
+
+    try:
+        # 1. a POST to a search service that answers with rows
+        setting(URL=here + "/search", METHOD="post", BODY={"query": {"policyNo": "{key}", "exact": True}, "page": 1}, RECORD="data.rows", OK="result.code=OK", MAP=fields)
+        got = SYS.lookup(sysd, 'PA-US-7730145')
+        assert got["status"] == "found" and got["record"]["policyholder"] == "Jordan Ellery" and got["record"]["region"] == "US" and got["connector"] == "http"
+        assert seen[-1]["body"] == {"query": {"policyNo": "PA-US-7730145", "exact": True}, "page": 1} and seen[-1]["type"] == "application/json"
+        assert SYS.lookup(sysd, "PA-US-0000000")["status"] == "not_found", "no rows is an answer: there is no such record"
+        busy = SYS.lookup(sysd, "BUSY")
+        assert busy["status"] == "unavailable" and "BUSY" in busy["reason"], "a system that says it cannot answer is not a system that says no"
+        tricky = SYS.lookup(sysd, 'x", "exact": false, "y": "')   # a key is data inside the request, never a way to rewrite it
+        assert seen[-1]["body"]["query"] == {"policyNo": 'x", "exact": false, "y": "', "exact": True} and tricky["status"] == "not_found"
+        # 2. "no such record" said with a 200
+        setting(URL=here + "/envelope", METHOD="POST", BODY={"policyNo": "{key}"}, RECORD="policy", NOT_FOUND="status.code=E404|E410", OK="status.code=S000", MAP=fields)
+        assert SYS.lookup(sysd, "PA-US-0000000")["status"] == "not_found" and SYS.lookup(sysd, "PA-US-7730145")["record"]["status"] == "in force"
+        setting(URL=here + "/envelope", METHOD="POST", BODY={"policyNo": "{key}"}, RECORD="nothing.here", MAP=fields)
+        lost = SYS.lookup(sysd, "PA-US-7730145")
+        assert lost["status"] == "unavailable" and "no record where one was expected" in lost["reason"], "a wrong setting is never read as a missing policy"
+        for bad in ({"METHOD": "DELETE"}, {"METHOD": "POST", "BODY": "{not json"}, {"MAP": "[1, 2]"}):
+            setting(URL=here + "/envelope", **bad)
+            assert SYS.lookup(sysd, "PA-US-7730145")["status"] == "unavailable"
+        # 3. the reference adapter: a named request object with the cabinet's credentials, a named response object with its own status
+        setting(ADAPTER="docuinsights.adapters.newgen_rest:lookup", URL=here + "/services/getPolicy", REQUEST="GetPolicyRequest", RESPONSE="GetPolicyResponse", KEY_FIELD="policyNumber", CABINET="claims",
+                USER="svc_docuinsights", PASSWORD="p4ss-w0rd", EXTRA={"locale": "en_US"}, RECORD="policy", NOT_FOUND="-50023, -50024", MAP=fields)
+        how = SYS.connector_of(sysd)
+        assert how["kind"] == "adapter" and how["authenticated"] and how["demonstration"] is False and "p4ss" not in json.dumps(how) and "p4ss" not in json.dumps(svc.connectors(T))
+        got = SYS.lookup(sysd, "PA-US-7730145")
+        assert got["status"] == "found" and got["connector"] == "adapter" and got["record"]["sum_insured"] == "USD 28,000.00" and seen[-1]["creds"] == ("claims", "svc_docuinsights", "p4ss-w0rd", "en_US")
+        assert SYS.lookup(sysd, "PA-US-0000000")["status"] == "not_found"
+        locked = SYS.lookup(sysd, "PA-US-9999999")
+        assert locked["status"] == "unavailable" and "cabinet is locked" in locked["reason"]
+        case = svc.assess(T, svc.load_sample(T, P_INS, "us_clean")["reference"])   # a whole case through the adapter
+        assert case["assessment"]["systems"]["policy_admin"]["connector"] == "adapter" and case["assessment"]["recommendation"]["outcome"] == "proceed"
+        assert "p4ss" not in json.dumps(case) and "p4ss" not in json.dumps(svc.ledger(T).entries(limit=200)), "a credential is in no case file and no ledger line"
+        assert_holds(svc, case)
+        setting(ADAPTER="docuinsights.adapters.newgen_rest:lookup", URL=here + "/services/getPolicy")   # half configured
+        assert "REQUEST" in SYS.lookup(sysd, "PA-US-7730145")["reason"]
+        # 4. an adapter of the installation's own, and every way one can go wrong
+        (tmp_path / "our_adapters.py").write_text(
+            "def good(system, key, settings):\n    return {'status': 'found', 'record': {'status': 'in force', 'region': settings['region'], 'secret_note': 'x', 'cover_end': None, 'excess': {'a': 1}}}\n"
+            "def none(system, key, settings):\n    return {'status': 'not_found'}\n"
+            "def raises(system, key, settings):\n    raise RuntimeError('database password is hunter2')\n"
+            "def nonsense(system, key, settings):\n    return 'yes'\n"
+            "def invents(system, key, settings):\n    return {'status': 'approved', 'record': {'status': 'in force'}}\n"
+            "def empty(system, key, settings):\n    return {'status': 'found', 'record': {}}\n", encoding="utf-8")
+        monkeypatch.syspath_prepend(str(tmp_path))
+        setting(ADAPTER="our_adapters:good", REGION="IN")
+        got = SYS.lookup(sysd, "PA-IN-2201987")
+        assert got["status"] == "found" and got["record"] == {"status": "in force", "region": "IN"}, "an adapter's record is held to the fields the use case declares, one value to a field"
+        setting(ADAPTER="our_adapters:none")
+        assert SYS.lookup(sysd, "X-1")["status"] == "not_found"
+        for name in ("raises", "nonsense", "invents", "empty", "missing_function"):
+            setting(ADAPTER="our_adapters:" + name)
+            ans = SYS.lookup(sysd, "X-1")
+            assert ans["status"] == "unavailable" and "hunter2" not in json.dumps(ans), (name, ans)
+        setting(ADAPTER="no_such_module_anywhere:lookup")
+        assert SYS.lookup(sysd, "X-1")["status"] == "unavailable"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_business_makes_the_rules_its_own_without_code(svc):
+    ref = svc.assess(T, svc.load_sample(T, P_INS, "india_clean")["reference"])["reference"]
+    before = svc.case(T, ref)["assessment"]
+    view = svc.rules(T, P_INS)
+    assert view["version"] == 0 and all(r["origin"] == "shipped" and r["enabled"] and r["says"].endswith(".") for r in view["rules"]) and len(view["fields"]) > 30 and view["history"] == []
+    assert next(r for r in view["rules"] if r["id"] == "notified_in_time_in")["says"] == "Claim notified is within 7 day(s) of Claim form · Date of loss (when Policy administration · Region is IN)."
+    # a rule is tried on a case before it is saved, and trying it changes nothing
+    trial = svc.test_rule(T, P_INS, OWN_RULE, ref)
+    assert trial["status"] == "fail" and "INR 48,600.00" in trial["message"] and "40,000" in trial["says"] and svc.case(T, ref)["assessment"] == before and svc.rules(T, P_INS)["version"] == 0
+    # added, changed, switched off, a document required: each is a version, with who and why
+    svc.change_rules(T, P_INS, {"do": "set", "rule": OWN_RULE, "note": "Authority limits from 1 December"}, by="Sam")
+    svc.change_rules(T, P_INS, {"do": "set", "rule": {"id": "notified_in_time_in", "max_days": 14}, "note": "Policy wording, condition 4"}, by="Sam")
+    svc.change_rules(T, P_INS, {"do": "off", "group": "rules", "id": "estimate_supports_claim", "note": "Estimates are checked by the assessor"}, by="Sam")
+    view = svc.change_rules(T, P_INS, {"do": "require", "evidence": {"id": "incident_always", "any_of": ["incident_report"], "title": "Incident report on every claim"}, "note": "Fraud team"}, by="Sam")
+    assert view["version"] == 4 and [(h["version"], h["what"], h["id"], h["by"]) for h in view["history"]] == [(4, "added", "incident_always", "Sam"), (3, "switched off", "estimate_supports_claim", "Sam"),
+                                                                                                         (2, "changed", "notified_in_time_in", "Sam"), (1, "added", "senior_review_above_40000", "Sam")]
+    by_id = {r["id"]: r for r in view["rules"]}
+    assert by_id["senior_review_above_40000"]["origin"] == "added here" and by_id["senior_review_above_40000"]["version"] == "w1" and by_id["notified_in_time_in"]["version"] == "1.0+w2"
+    assert by_id["notified_in_time_in"]["origin"] == "changed here" and by_id["notified_in_time_in"]["shipped"]["max_days"] == 7 and not by_id["estimate_supports_claim"]["enabled"]
+    # the next assessment runs under them; the earlier one keeps the rules it ran under
+    after = svc.assess(T, ref)
+    assert_holds(svc, after)
+    a = after["assessment"]
+    assert a["rulebook"]["version"] == 4 and before["rulebook"]["version"] == 0 and after["history"][-1]["id"] == before["id"] if after.get("history") else True
+    got = {f["id"]: f for f in a["findings"]}
+    assert got["RULE-senior_review_above_40000"]["status"] == "fail" and got["RULE-senior_review_above_40000"]["rule"]["version"] == "w1" and got["RULE-senior_review_above_40000"]["rule"]["note"] == "Claims authority matrix, section 2"
+    assert got["RULE-notified_in_time_in"]["rule"]["params"]["max_days"] == 14 and "limit is 14 days" in got["RULE-notified_in_time_in"]["message"] and "RULE-estimate_supports_claim" not in got
+    assert got["EV-incident_always"]["status"] == "missing" and a["recommendation"]["outcome"] != "proceed"
+    assert next(f for f in before["findings"] if f["id"] == "RULE-notified_in_time_in")["rule"]["params"]["max_days"] == 7, "the case as it was assessed then shows the rule that was in force then"
+    kb = svc.knowledge(T)
+    names = {e["name"] for e in kb.load()["entities"].values() if e["type"] == "PolicyRule"}
+    assert OWN_RULE["title"] in names and "The repair estimate supports the amount claimed" not in names, "the knowledge graph names the rules in force"
+    # another workspace, and another use case, are untouched
+    assert svc.rules("other", P_INS)["version"] == 0 and svc.rules(T, "supplier_invoice")["version"] == 0
+    other = svc.assess("other", svc.load_sample("other", P_INS, "india_clean")["reference"])
+    assert other["assessment"]["recommendation"]["outcome"] == "proceed" and "RULE-senior_review_above_40000" not in statuses(other)
+    # taken back, removed, switched on again
+    svc.change_rules(T, P_INS, {"do": "reset", "id": "notified_in_time_in"}, by="Sam")
+    svc.change_rules(T, P_INS, {"do": "reset", "id": "senior_review_above_40000"}, by="Sam")
+    svc.change_rules(T, P_INS, {"do": "reset", "id": "incident_always"}, by="Sam")
+    view = svc.change_rules(T, P_INS, {"do": "on", "group": "rules", "id": "estimate_supports_claim"}, by="Sam")
+    assert view["version"] == 8 and all(r["origin"] == "shipped" and r["enabled"] for r in view["rules"]) and all(e["origin"] == "shipped" for e in view["evidence"])
+    assert svc.assess(T, ref)["assessment"]["recommendation"]["outcome"] == "proceed"
+    said = [e["summary"] for e in svc.ledger(T).entries(limit=500) if e["kind"] == "rules"]
+    assert len(said) == 8 and any("Authority limits from 1 December" in x for x in said) and svc.ledger(T).verify()["ok"]
+
+
+BAD_CHANGES = [
+    ({"do": "set", "rule": {"id": "x1", "title": "t", "type": "date_order", "first": "claim_form.claimed_amount", "then": "nope.field"}}, "unknown field"),
+    ({"do": "set", "rule": {"id": "x1", "title": "t", "type": "date_order", "first": "claim_form.claimed_amount", "then": "claim_form.loss_date"}}, "is not a date"),
+    ({"do": "set", "rule": {"id": "Bad Id", "title": "t", "type": "required_field", "field": "claim_form.claimant"}}, "lower-case"),
+    ({"do": "set", "rule": {"id": "x1", "title": "", "type": "required_field", "field": "claim_form.claimant"}}, "title"),
+    ({"do": "set", "rule": {"id": "x1", "title": "t", "type": "python", "code": "import os"}}, "unknown type"),
+    ({"do": "set", "rule": {"id": "x1", "title": "t", "type": "value_limit", "field": "claim_form.claimant", "max": 5}}, "not an amount"),
+    ({"do": "set", "rule": {"id": "x1", "title": "t", "type": "value_limit", "field": "claim_form.claimed_amount"}}, "a most, a least"),
+    ({"do": "set", "rule": {"id": "x1", "title": "t", "type": "value_limit", "field": "claim_form.claimed_amount", "max": "lots"}}, "must be a number"),
+    ({"do": "set", "rule": {"id": "x1", "title": "t", "type": "date_interval", "from": "claim_form.loss_date", "to": "case.notified_date", "max_days": -3}}, "whole number"),
+    ({"do": "set", "rule": {"id": "x1", "title": "t", "type": "value_in", "field": "record.policy_admin.status", "values": []}}, "needs"),
+    ({"do": "set", "rule": {"id": "x1", "title": "t", "type": "required_field", "field": "record.billing.status"}}, "unknown field"),
+    ({"do": "set", "rule": {"id": "x1", "title": "t", "type": "required_field", "field": "claim_form.claimant", "applies_when": {"ref": "case.nope", "is": "x"}}}, "applies when"),
+    ({"do": "set", "rule": {"id": "policy_in_force", "type": "date_order"}}, "keeps its kind"),
+    ({"do": "set", "rule": {"id": "policy_in_force"}}, "nothing was changed"),
+    ({"do": "off", "group": "rules", "id": "policy_in_force"}, "say why"),
+    ({"do": "off", "group": "rules", "id": "nope", "note": "because"}, "there is no"),
+    ({"do": "on", "group": "rules", "id": "policy_in_force"}, "already switched on"),
+    ({"do": "reset", "id": "policy_in_force"}, "has not been changed"),
+    ({"do": "require", "evidence": {"id": "extra", "any_of": ["passport"]}}, "unknown: passport"),
+    ({"do": "require", "evidence": {"id": "claim", "any_of": ["claim_form"]}}, "an id of its own"),
+    ({"do": "delete everything"}, "say what to do"),
+    ("a string", "as an object"), (None, "as an object"), ([], "nothing to change"),
+]
+
+
+@pytest.mark.parametrize("change,why", BAD_CHANGES, ids=[str(i) for i in range(len(BAD_CHANGES))])
+def test_a_change_that_makes_no_sense_is_refused_in_words_and_nothing_is_kept(svc, change, why):
+    with pytest.raises(ServiceError) as err:
+        svc.change_rules(T, P_INS, change)
+    assert why in str(err.value), str(err.value)
+    assert svc.rules(T, P_INS)["version"] == 0 and not (svc.data_dir / T / "rules").exists()
+
+
+def test_several_changes_are_all_made_or_none_and_the_shipped_profile_is_never_touched(svc):
+    with pytest.raises(ServiceError):
+        svc.change_rules(T, P_INS, [{"do": "set", "rule": OWN_RULE}, {"do": "off", "group": "rules", "id": "nope", "note": "because"}])
+    assert svc.rules(T, P_INS)["version"] == 0, "one bad change in a batch and none is kept"
+    shipped = json.dumps(get_profile(P_INS).rules, sort_keys=True)
+    svc.change_rules(T, P_INS, [{"do": "set", "rule": OWN_RULE}, {"do": "set", "rule": {"id": "notified_in_time_in", "max_days": 21}}])
+    assert json.dumps(get_profile(P_INS).rules, sort_keys=True) == shipped and len(get_profile(P_INS).rules) + 1 == len(svc._p(T, P_INS).rules)
+    assert next(r for r in svc._p(T, P_INS).rules if r["id"] == "notified_in_time_in")["max_days"] == 21 and next(r for r in get_profile(P_INS).rules if r["id"] == "notified_in_time_in")["max_days"] == 7
+    with pytest.raises(ServiceError):
+        svc.test_rule(T, P_INS, OWN_RULE, "NOPE")
+    ref = svc.load_sample(T, "supplier_invoice", "clean")["reference"]
+    with pytest.raises(ServiceError) as err:
+        svc.test_rule(T, P_INS, OWN_RULE, ref)
+    assert "not a Insurance claim review case" in str(err.value)
+    # every shipped use case: its rules read as sentences, and its sheet goes out and comes back as nothing to change
+    for pid, profile in load_profiles().items():
+        view = svc.rules("clean", pid)
+        assert view["rules"] and all(r["says"] and "{" not in r["says"] for r in view["rules"]) and all(f["ref"].count(".") >= 1 for f in view["fields"])
+        back = svc.import_rules("clean", pid, svc.rules_template("clean", pid))
+        assert back["changes"] == 0 and back["refused"] == 0 and back["applied"] is False, (pid, back["rows"])
+
+
+def test_the_rules_sheet_is_filled_in_and_imported(svc):
+    sheet = svc.rules_template(T, P_INS)
+    assert sheet.splitlines()[0] == ",".join(RB.COLUMNS) and "notified_in_time_in" in sheet and "document_required" in sheet
+    filled = sheet.replace("applies_when_value,enabled,note\n", "applies_when_value,enabled,note\n", 1)
+    filled = "\n".join(("notified_in_time_in" in line and line.replace(",7,", ",10,")) or ("estimate_supports_claim" in line and line.replace(",yes,", ",no,")) or line for line in filled.splitlines()) + "\n"
+    filled += "repairer_named,The repairer is named on the estimate,required_field,repair_estimate.repairer,,,,,,yes,Claims manual 3.2\n"
+    filled += "excluded_causes,The cause of loss is not an excluded one,value_not_in,claim_form.circumstances,,wear and tear; mechanical breakdown,,,,yes,\n"
+    filled += "incident_always,Incident report on every claim,document_required,incident_report,,,,,,yes,\n"
+    filled += "broken_row,Not a real field,date_order,claim_form.nope,claim_form.loss_date,,,,,yes,\n"
+    filled += "=cmd|' /C calc'!A0,Formula,required_field,claim_form.claimant,,,,,,yes,\n,,,,,,,,,,\n"
+    seen = svc.import_rules(T, P_INS, "﻿" + filled)
+    does = {r["id"]: r["does"] for r in seen["rows"]}
+    assert seen["applied"] is False and svc.rules(T, P_INS)["version"] == 0, "reading a sheet changes nothing until it is applied"
+    assert does["notified_in_time_in"] == "change" and does["estimate_supports_claim"] == "switch off" and does["repairer_named"] == "add" and does["excluded_causes"] == "add" and does["incident_always"] == "add"
+    assert does["broken_row"] == "refused" and "unknown field" in next(r["problem"] for r in seen["rows"] if r["id"] == "broken_row") and does["=cmd|' /c calc'!a0"] == "refused"
+    assert seen["changes"] == 5 and seen["refused"] == 2 and sum(1 for r in seen["rows"] if r["does"] == "nothing") == len(seen["rows"]) - 7
+    done = svc.import_rules(T, P_INS, filled, by="Sam", apply=True)
+    view = done["rules"]
+    by_id = {r["id"]: r for r in view["rules"]}
+    assert done["applied"] and view["version"] == 5 and by_id["notified_in_time_in"]["rule"]["max_days"] == 10 and not by_id["estimate_supports_claim"]["enabled"] and "broken_row" not in by_id
+    assert by_id["excluded_causes"]["rule"]["negate"] is True and by_id["excluded_causes"]["says"] == "Claim form · Circumstances of loss is none of: wear and tear, mechanical breakdown."
+    assert any(e["id"] == "incident_always" and e["origin"] == "added here" for e in view["evidence"]) and all(h["by"] == "Sam" for h in view["history"])
+    again = svc.import_rules(T, P_INS, svc.rules_template(T, P_INS))
+    assert again["changes"] == 0 and again["refused"] == 0, "the sheet of the rules in force asks for nothing"
+    for junk in ("", "not,a,rules,sheet\n1,2,3,4\n", "id,kind\n" + "x,required_field\n" * 501):
+        with pytest.raises(ServiceError):
+            svc.import_rules(T, P_INS, junk)
+
+
+def _as_a_spreadsheet_saves_it(rows: list[list], *, first_sheet: str = "Notes") -> bytes:
+    """A workbook written the way a spreadsheet program writes one, which is not how the product writes its own: text in a shared table (one entry as
+    formatted runs with a phonetic guide), TRUE/FALSE as booleans, whole numbers with a decimal point, empty cells left out, and another sheet in front."""
+    main, rel = "http://schemas.openxmlformats.org/spreadsheetml/2006/main", "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    shared: list[str] = []
+    body = []
+    for i, row in enumerate(rows, start=1):
+        cells = []
+        for j, v in enumerate(row):
+            ref = f"{chr(65 + j)}{i}"
+            if v in (None, ""):
+                continue
+            if isinstance(v, bool):
+                cells.append(f'<c r="{ref}" t="b"><v>{int(v)}</v></c>')
+            elif isinstance(v, (int, float)):
+                cells.append(f'<c r="{ref}"><v>{float(v)}</v></c>')
+            else:
+                if v not in shared:
+                    shared.append(v)
+                cells.append(f'<c r="{ref}" t="s"><v>{shared.index(v)}</v></c>')
+        body.append(f'<row r="{i}">{"".join(cells)}</row>')
+    esc = lambda t: t.replace("&", "&amp;").replace("<", "&lt;")  # noqa: E731
+    sst = "".join(f"<si><r><t>{esc(t[:3])}</t></r><r><t xml:space=\"preserve\">{esc(t[3:])}</t></r><rPh sb=\"0\" eb=\"1\"><t>guide</t></rPh></si>" if n == 1 else f"<si><t xml:space=\"preserve\">{esc(t)}</t></si>"
+                  for n, t in enumerate(shared))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("[Content_Types].xml", '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>')
+        z.writestr("xl/workbook.xml", f'<workbook xmlns="{main}" xmlns:r="{rel}"><sheets><sheet name="{first_sheet}" sheetId="1" r:id="rId7"/><sheet name="Rules" sheetId="2" r:id="rId9"/></sheets></workbook>')
+        z.writestr("xl/_rels/workbook.xml.rels", f'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId7" Type="{rel}/worksheet" Target="worksheets/sheet1.xml"/>'
+                   f'<Relationship Id="rId9" Type="{rel}/worksheet" Target="/xl/worksheets/sheet2.xml"/></Relationships>')
+        z.writestr("xl/sharedStrings.xml", f'<sst xmlns="{main}">{sst}</sst>')
+        z.writestr("xl/worksheets/sheet1.xml", f'<worksheet xmlns="{main}"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Our notes, not rules</t></is></c></row></sheetData></worksheet>')
+        z.writestr("xl/worksheets/sheet2.xml", f'<worksheet xmlns="{main}"><sheetData>{"".join(body)}</sheetData></worksheet>')
+    return buf.getvalue()
+
+
+def test_the_rules_workbook_is_what_a_claims_team_fills_in(svc):
+    """The sheet as a workbook: the rules in force, how each kind is written, the names a rule can use. It comes back as it went out, and it comes
+    back from a spreadsheet program too, which writes the same cells quite differently."""
+    book = svc.rules_workbook(T, P_INS)
+    with zipfile.ZipFile(io.BytesIO(book)) as z:
+        names = z.namelist()
+        wb, rules_xml, how, vals = (z.read(n).decode() for n in ("xl/workbook.xml", "xl/worksheets/sheet1.xml", "xl/worksheets/sheet2.xml", "xl/worksheets/sheet3.xml"))
+        assert z.testzip() is None and {"[Content_Types].xml", "_rels/.rels", "xl/styles.xml", "xl/_rels/workbook.xml.rels"} <= set(names)
+    assert [m for m in re.findall(r'<sheet name="([^"]+)"', wb)] == ["Rules", "How to fill it in", "Values"]
+    assert "<dataValidation " in rules_xml and "date_interval,amount_limit" in rules_xml and "&quot;yes,no&quot;" in rules_xml and 'state="frozen"' in rules_xml, "the kind and enabled cells offer their lists"
+    assert all(kind in how for kind in RB.KINDS) and "Nothing changes until someone presses Import" in how
+    assert "record.policy_admin.status" in vals and "claim_form.loss_date" in vals and "incident_report" in vals
+    assert list(csv.reader(io.StringIO(RB.sheet_text(book))))[0] == RB.COLUMNS
+    same = svc.import_rules(T, P_INS, book)
+    assert same["changes"] == 0 and same["refused"] == 0 and len(same["rows"]) == 15, "the workbook of the rules in force asks for nothing"
+    for pid in load_profiles():   # every use case, not only the one with the most rules
+        back = svc.import_rules(T, pid, svc.rules_workbook(T, pid))
+        assert back["changes"] == 0 and back["refused"] == 0 and back["rows"], pid
+    rows = [list(r) for r in csv.reader(io.StringIO(svc.rules_template(T, P_INS)))]
+    col = RB.COLUMNS.index
+    for r in rows[1:]:
+        if r[0] == "notified_in_time_in":
+            r[col("limit_or_values")] = 14          # typed as a number: saved as 14.0
+        if r[0] == "estimate_supports_claim":
+            r[col("enabled")] = False               # typed as FALSE: saved as a boolean
+        if r[0] == "notified_in_time_us":
+            r[col("limit_or_values")] = 30.0
+            r[col("enabled")] = True
+    rows.append(["high_value_in", "India: a claim above 500,000 goes to a senior handler", "value_limit", "claim_form.claimed_amount", "", "max=500000; currency=INR", "", "record.policy_admin.region", "IN", "yes", "Authority limit (sample)"])
+    rows.append(["broken_row", "No such kind", "telepathy", "claim_form.claimed_amount"])
+    filled = _as_a_spreadsheet_saves_it(rows)
+    seen = svc.import_rules(T, P_INS, filled)
+    does = {r["id"]: r["does"] for r in seen["rows"]}
+    assert does["notified_in_time_in"] == "change" and does["estimate_supports_claim"] == "switch off" and does["high_value_in"] == "add" and does["broken_row"] == "refused" and does["notified_in_time_us"] == "nothing"
+    assert seen["changes"] == 3 and seen["refused"] == 1 and svc.rules(T, P_INS)["version"] == 0
+    done = svc.import_rules(T, P_INS, filled, by="Head of claims", apply=True)
+    by_id = {r["id"]: r for r in done["rules"]["rules"]}
+    assert done["rules"]["version"] == 3 and by_id["notified_in_time_in"]["rule"]["max_days"] == 14 and not by_id["estimate_supports_claim"]["enabled"]
+    assert by_id["high_value_in"]["rule"]["max"] == 500000 and by_id["high_value_in"]["rule"]["currency"] == "INR" and by_id["high_value_in"]["rule"]["applies_when"] == {"ref": "record.policy_admin.region", "is": "IN"}
+    # the sheet as text, the way a spreadsheet exports it in other regions and on Windows
+    semi = io.StringIO()
+    csv.writer(semi, delimiter=";", lineterminator="\r\n").writerows(csv.reader(io.StringIO(svc.rules_template(T, P_INS))))
+    assert svc.import_rules(T, P_INS, "\ufeff" + semi.getvalue())["changes"] == 0
+    old = ("id,title,kind,field_1,field_2,limit_or_values,tolerance_pct,applies_when_field,applies_when_value,enabled,note\n"
+           "repairer_named,Repairer named \u2013 caf\u00e9 rule,required_field,repair_estimate.repairer,,,,,,yes,\n").encode("cp1252")
+    got = svc.import_rules(T, P_INS, old)
+    assert got["changes"] == 1 and got["rows"][0]["title"] == "Repairer named \u2013 caf\u00e9 rule", "a sheet saved in the Windows code page keeps its letters"
+    for junk in (b"PK\x03\x04 not a workbook", _as_a_spreadsheet_saves_it([["nothing", "here"]]), b"", b"PK" + b"0" * (5 * 1024 * 1024)):
+        with pytest.raises(ServiceError):
+            svc.import_rules(T, P_INS, junk)
+    assert svc.ledger(T).verify()["ok"]
+
+
+def test_rules_and_connectors_over_the_api(live):
+    call, service = live
+    status, view = call("GET", f"/api/rules/{P_INS}")
+    assert status == 200 and view["version"] == 0 and len(view["rules"]) == 11 and view["systems"][0]["id"] == "policy_admin"
+    status, view = call("POST", f"/api/rules/{P_INS}", {"do": "set", "rule": OWN_RULE, "note": "From the API"}, headers={"x-docuinsights-user": "Maria"})
+    assert status == 200 and view["version"] == 1 and view["history"][0]["by"] == "Maria"
+    status, view = call("POST", f"/api/v1/rules/{P_INS}", {"changes": [{"do": "off", "group": "consistency", "id": "vehicle", "note": "Fleet policies"}, {"do": "set", "rule": {"id": "notified_in_time_us", "max_days": 45}}]})
+    assert status == 200 and view["version"] == 3 and not next(c for c in view["consistency"] if c["id"] == "vehicle")["enabled"]
+    for path, body, code in ((f"/api/rules/{P_INS}", {"do": "set", "rule": {"id": "x1", "title": "t", "type": "python"}}, 400), ("/api/rules/nope", {"do": "reset", "id": "x"}, 400), (f"/api/rules/{P_INS}/test", {"rule": OWN_RULE, "case": "NOPE"}, 404),
+                             (f"/api/rules/{P_INS}/import", {"text": "junk"}, 400), (f"/api/rules/{P_INS}", {"changes": "all of them"}, 400), ("/api/connectors/test", {"profile": P_INS, "system": "billing", "key": "1"}, 404),
+                             ("/api/connectors/test", {"profile": P_INS, "system": "policy_admin", "key": ""}, 400)):
+        status, out = call("POST", path, body)
+        assert status == code and out["detail"], (path, body, status, out)
+    status, sheet = call("GET", f"/api/rules/{P_INS}/template.csv")
+    assert status == 200 and sheet.splitlines()[0].startswith("id,title,kind") and "senior_review_above_40000" in sheet
+    status, pre = call("POST", f"/api/rules/{P_INS}/import", {"text": sheet})
+    assert status == 200 and pre["changes"] == 0 and pre["applied"] is False
+    req = urllib.request.Request(call.base + f"/api/rules/{P_INS}/template.xlsx", headers={"authorization": "Bearer " + "k-" + "t" * 20})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        book = resp.read()
+        assert resp.status == 200 and "spreadsheetml" in resp.headers["content-type"] and f"rules-{P_INS}.xlsx" in resp.headers["content-disposition"] and book[:2] == b"PK"
+    status, pre = call("POST", f"/api/rules/{P_INS}/import", {"content_base64": base64.b64encode(book).decode()})
+    assert status == 200 and pre["changes"] == 0 and pre["refused"] == 0
+    status, out = call("POST", f"/api/rules/{P_INS}/import", {"content_base64": "%%%not base64%%%"})
+    assert status == 400 and out["detail"]
+    status, con = call("GET", "/api/connectors")
+    assert status == 200 and con["systems"][0]["kind"] == "synthetic" and set(con["systems"][0]["regions"]) >= {"US", "IN"} and con["write_back"]["webhook"]["on"] is False and con["intake"]["api"] == "/api/v1/cases"
+    status, ans = call("POST", "/api/connectors/test", {"profile": P_INS, "system": "policy_admin", "key": "pa-us-7730688"})
+    assert status == 200 and ans["status"] == "found" and ans["record"]["status"] == "cancelled" and ans["demonstration"] is True
+    status, made = call("POST", "/api/samples", {"profile": P_INS, "sample": "us_clean"})
+    for _ in range(200):
+        status, case = call("GET", f"/api/cases/{made['reference']}")
+        if (case.get("progress") or {}).get("state") in ("done", "failed"):
+            break
+        time.sleep(0.05)
+    assert case["assessment"]["rulebook"]["version"] == 3 and case["assessment"]["systems"]["policy_admin"]["record"]["region"] == "US"
+    status, t = call("POST", f"/api/rules/{P_INS}/test", {"rule": {**OWN_RULE, "applies_when": None, "currency": "USD", "max": 1000}, "case": made["reference"]})
+    assert status == 200 and t["status"] == "fail" and "USD 3,480.00" in t["message"]
+    # the answer another system reads says which rules it was made on and what the records said; the decision a person made there is written back
+    status, res = call("GET", f"/api/v1/cases/{made['reference']}")
+    assert status == 200 and res["rules"]["version"] == 3 and res["systems"]["policy_admin"]["status"] == "found" and res["systems"]["policy_admin"]["demonstration"] is True
+    status, out = call("POST", f"/api/v1/cases/{made['reference']}/decision", {"decision": "sideways"})
+    assert status == 400 and out["detail"]
+    status, res = call("POST", f"/api/v1/cases/{made['reference']}/decision", {"decision": "approve", "note": "Decided in the claims system"}, headers={"x-docuinsights-user": "claims-system"})
+    assert status == 200 and res["decision"]["decision"] == "approve" and res["decision"]["by"] == "claims-system"
+    assert service.ledger(T).verify()["ok"]
+
+
+def test_only_an_administrator_changes_how_the_workspace_is_governed(live, monkeypatch):
+    """With an administrator key set, casework goes on as before; a change to the rules, the prices and limits, the knowledge or what was learned
+    needs that key. Anyone may still stop: pause the workspace, stop a case. Releasing the pause is the administrator's."""
+    call, service = live
+    status, cfg = call("GET", "/api/config")
+    assert status == 200 and cfg["admin"] == "open"
+    monkeypatch.setenv("DOCUINSIGHTS_ADMIN_KEY", "adm-" + "g" * 24)
+    admin = {"x-docuinsights-admin": "adm-" + "g" * 24}
+    status, cfg = call("GET", "/api/config")
+    assert status == 200 and cfg["admin"] == "key" and "adm-" not in json.dumps(cfg)   # it says a key is in force, never what it is
+    governed = ((f"/api/rules/{P_INS}", {"do": "set", "rule": OWN_RULE, "note": "Without the key"}), (f"/api/v1/rules/{P_INS}", {"changes": [{"do": "off", "group": "consistency", "id": "vehicle", "note": "Without the key"}]}),
+                (f"/api/rules/{P_INS}/import", {"text": service.rules_template(T, P_INS), "apply": True}),
+                (f"/api/rules/{P_INS}/import", {"content_base64": base64.b64encode(service.rules_workbook(T, P_INS)).decode(), "apply": True}), ("/api/spend", {"case_token_limit": 5}), ("/api/spend", {"paused": False}),
+                ("/api/spend", {"paused": True, "price_input": 0.01}), ("/api/knowledge/facts", {"statement": "x"}), ("/api/knowledge/imports", {"name": "x.md", "content_base64": "eA=="}),
+                ("/api/knowledge/bases/customs_trade", {"on": False}), (f"/api/feedback/{P_INS}/p1", {"decision": "approve"}))
+    for n, (path, body) in enumerate(governed):
+        for headers in (None, {"x-docuinsights-admin": ""}, *([{"x-docuinsights-admin": "adm-wrong"}] if n < 3 else [])):
+            status, out = call("POST", path, body, headers=headers)
+            assert status == 403 and "administrator key" in out["detail"], (path, headers, status, out)
+    assert service.rules(T, P_INS)["version"] == 0 and service.spend(T)["settings"]["case_token_limit"] in (0, None) and not service.spend(T)["settings"]["paused"]
+    assert not [e for e in service.ledger(T).entries(limit=200) if e["kind"] in ("rules", "spend")]   # a refused change leaves no trace of having been made
+    # casework, reading, testing and previewing need no more than they did
+    for method, path, body in (("GET", f"/api/rules/{P_INS}", None), ("GET", "/api/connectors", None), ("GET", "/api/spend", None), ("GET", f"/api/rules/{P_INS}/template.csv", None),
+                               ("POST", f"/api/rules/{P_INS}/import", {"text": service.rules_template(T, P_INS)}), ("POST", "/api/connectors/test", {"profile": P_INS, "system": "policy_admin", "key": "PA-IN-2201987"})):
+        status, _ = call(method, path, body)
+        assert status == 200, (method, path, status)
+    status, made = call("POST", "/api/samples", {"profile": P_INS, "sample": "india_clean"})
+    assert status == 201
+    for _ in range(200):
+        status, case = call("GET", f"/api/cases/{made['reference']}")
+        if (case.get("progress") or {}).get("state") in ("done", "failed"):
+            break
+        time.sleep(0.05)
+    assert case["assessment"]["recommendation"]["outcome"] == "proceed"
+    status, t = call("POST", f"/api/rules/{P_INS}/test", {"rule": {**OWN_RULE, "applies_when": None, "currency": "INR", "max": 1000}, "case": made["reference"]})
+    assert status == 200 and t["status"] == "fail"
+    # anyone may pull the brake; only the administrator releases it
+    status, sp = call("POST", "/api/spend", {"paused": True, "note": "A run looks wrong"}, headers={"x-docuinsights-user": "Maria"})
+    assert status == 200 and sp["settings"]["paused"]["by"] == "Maria"
+    status, out = call("POST", "/api/spend", {"paused": False})
+    assert status == 403 and service.spend(T)["settings"]["paused"]
+    status, sp = call("POST", "/api/spend", {"paused": False}, headers=admin)
+    assert status == 200 and not sp["settings"]["paused"]
+    # with the key, the change is made and the trail says who made it
+    status, view = call("POST", f"/api/rules/{P_INS}", {"do": "set", "rule": OWN_RULE, "note": "Agreed with claims"}, headers={**admin, "x-docuinsights-user": "Head of claims"})
+    assert status == 200 and view["version"] == 1 and view["history"][0]["by"] == "Head of claims"
+    status, sp = call("POST", "/api/spend", {"case_token_limit": 90000}, headers=admin)
+    assert status == 200 and sp["settings"]["case_token_limit"] == 90000
+    # the administrator key cannot be found by trying: after ten wrong ones the address waits, whatever it sends next. Casework is not held up by it
+    seen = []
+    for n in range(12):
+        status, out = call("POST", f"/api/rules/{P_INS}", {"do": "on", "group": "rules", "id": "estimate_supports_claim"}, headers={"x-docuinsights-admin": f"guess-{n}"})
+        seen.append(status)
+        if status == 429:
+            break
+    assert seen == [403] * 7 + [429] and "Too many wrong administrator keys" in out["detail"], seen   # three wrong keys were sent above
+    status, out = call("POST", f"/api/rules/{P_INS}", {"do": "on", "group": "rules", "id": "estimate_supports_claim"}, headers=admin)
+    assert status == 429, "the right key is not accepted from an address that is guessing"
+    assert call("GET", f"/api/rules/{P_INS}")[0] == 200 and call("POST", "/api/samples", {"profile": P_INS, "sample": "us_clean"})[0] == 201
+    assert service.ledger(T).verify()["ok"]
+
+
+def test_a_workspaces_rules_outlive_an_upgrade_and_a_damaged_file_out_loud(svc, tmp_path):
+    """What the business wrote must never be dropped quietly. A rule of its own that the next version can no longer run stays in the rules, says so on
+    every case and sends the case to a person. A rules file that cannot be read stops that use case with a plain reason: it is never taken for
+    "no rules of our own", which would put the shipped sample limits back without anyone knowing."""
+    svc.change_rules(T, P_INS, [{"do": "set", "rule": {"id": "notified_in_time_in", "max_days": 10}, "note": "Policy wording"}, {"do": "set", "rule": {**OWN_RULE, "max": 900000}, "note": "Authority limits"}])
+    ref = svc.load_sample(T, P_INS, "india_clean")["reference"]
+    assert svc.assess(T, ref)["assessment"]["recommendation"]["outcome"] == "proceed"
+    path = tmp_path / "data" / T / "rules" / f"{P_INS}.json"
+    book = json.loads(path.read_text(encoding="utf-8"))
+    book["rules"]["names_a_value_now_gone"] = {"id": "names_a_value_now_gone", "title": "The broker is named", "type": "required_field", "field": "claim_form.broker_reference"}
+    book["rules"]["of_a_kind_now_gone"] = {"id": "of_a_kind_now_gone", "title": "A check this version does not have", "type": "fuzzy_match", "field": "claim_form.claimant"}
+    path.write_text(json.dumps(book), encoding="utf-8")   # as an upgrade would leave it: sound when it was saved, not runnable now
+    case = svc.assess(T, ref)
+    st, a = statuses(case), case["assessment"]
+    assert st["RULE-names_a_value_now_gone"] == "review" and st["RULE-of_a_kind_now_gone"] == "review" and a["recommendation"]["outcome"] == "review", "a rule that cannot run is not a rule that passed"
+    said = next(f for f in a["findings"] if f["id"] == "RULE-names_a_value_now_gone")
+    assert "could not be run" in said["message"] and "claim_form.broker_reference" in said["message"] and said["requires_human"]
+    assert st["RULE-notified_in_time_in"] == "pass" and st["RULE-senior_review_above_40000"] == "pass", "the rules that can run still run"
+    assert_holds(svc, case)
+    view = {r["id"]: r for r in svc.rules(T, P_INS)["rules"]}
+    assert "unknown field" in view["names_a_value_now_gone"]["problem"] and "unknown type" in view["of_a_kind_now_gone"]["problem"] and view["notified_in_time_in"]["problem"] == ""
+    assert "names_a_value_now_gone" in svc.rules_template(T, P_INS) and svc.rules_workbook(T, P_INS)[:2] == b"PK"   # they are still in the sheet, to be corrected there
+    assert "could not be run" in svc.record(T, ref)
+    svc.change_rules(T, P_INS, [{"do": "reset", "id": "names_a_value_now_gone", "note": "No longer needed"}, {"do": "reset", "id": "of_a_kind_now_gone"}])
+    assert svc.assess(T, ref)["assessment"]["recommendation"]["outcome"] == "proceed"
+    # the file itself is damaged (a disk, a hand edit): that use case stops and says why; the others go on
+    other = svc.load_sample(T, "customs_claim", "positive")["reference"]
+    for damage in ("{ half a file", "[1, 2, 3]", ""):
+        path.write_text(damage, encoding="utf-8")
+        for attempt in (lambda: svc.assess(T, ref), lambda: svc.rules(T, P_INS), lambda: svc.change_rules(T, P_INS, {"do": "on", "group": "rules", "id": "notified_in_time"}),
+                        lambda: svc.rules_template(T, P_INS), lambda: svc.import_rules(T, P_INS, "id,kind\nx,required_field\n"), lambda: svc.counterfactual(T, ref), lambda: svc.load_sample(T, P_INS, "us_clean")):
+            with pytest.raises(ServiceError) as err:
+                attempt()
+            assert "could not be read" in str(err.value) and err.value.status == 409
+        assert path.read_text(encoding="utf-8") == damage, "nothing writes over a file it could not read"
+        svc.assess_in_background(T, ref)
+        for _ in range(200):
+            got = svc.case(T, ref)
+            if (got.get("progress") or {}).get("state") in ("done", "failed"):
+                break
+            time.sleep(0.02)
+        assert got["progress"]["state"] == "failed" and "could not be read" in got["progress"]["error"]
+        assert got["assessment"]["recommendation"]["outcome"] == "proceed", "the case keeps the assessment it had"
+        assert svc.assess(T, other)["assessment"]["recommendation"]["outcome"] == "proceed" and svc.rules(T, "customs_claim")["version"] == 0
+        assert svc.cases(T) and svc.knowledge_overview(T)["index"]["entities"] and svc.connectors(T)["systems"]
+    path.write_text(json.dumps(book), encoding="utf-8")   # restored from a backup
+    assert svc.rules(T, P_INS)["version"] == book["version"] and svc.ledger(T).verify()["ok"]

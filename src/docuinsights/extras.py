@@ -81,8 +81,19 @@ def counterfactual(case: dict[str, Any], profile: Profile, tools: P.Tools, chang
     twin["history"], twin["events"] = [], []
     described = apply_change(twin, profile, change, case)
     # the copy is assessed with the same memory and the same limits as the case, and leaves no trace: no ledger line, nothing learned
+    held = before.get("systems") or {}
+
+    def record(system: dict[str, Any], key: Any) -> dict[str, Any]:
+        """The record as it stood when the case was assessed: a what-if changes one fact, not the record. Only a changed key is looked up again."""
+        got = held.get(system["id"])
+        if got and str(got.get("key") or "") == str(key or ""):
+            return copy.deepcopy(got)
+        from . import systems
+
+        return systems.lookup(system, key)
+
     quiet = P.Tools(model=tools.model, read_bytes=tools.read_bytes, overlay=tools.overlay, fetch=tools.fetch, sidecar=tools.sidecar, episodes=tools.episodes, limiter=tools.limiter,
-                    today=tools.today, watchlists=tools.watchlists)
+                    today=tools.today, watchlists=tools.watchlists, lookup=record if tools.lookup else None)
     after = P.assess(twin, profile, quiet, trigger="counterfactual", by="counterfactual agent")
     b = {f["id"]: f for f in before["findings"]}
     a = {f["id"]: f for f in after["findings"]}
@@ -99,6 +110,10 @@ def counterfactual(case: dict[str, Any], profile: Profile, tools: P.Tools, chang
             for r in after.get("references") or []]
     explain = [f"{m['title']}: {m['before']} -> {m['after']}. {m['after_message']}" for m in moved if m["before"] != m["after"]]
     explain += [f"The reference was read again for {r['after']} ({r['after_version']}); candidate {r['candidate_after'] or 'none'}." for r in refs if r["before"] != r["after"]]
+    then, today = (before.get("rulebook") or {}).get("version", 0), (getattr(profile, "rulebook", None) or {}).get("version", 0)
+    if then != today:   # the copy is assessed on the rules in force now: say so when they are not the ones the case was assessed on
+        explain.insert(0, f"The workspace's rules have changed since this case was assessed (version {then} then, version {today} now), so a finding may have moved for that reason alone. "
+                          "Assess the case again for a like-for-like comparison.")
     if rb["outcome"] != ra["outcome"]:
         explain.append(f"The recommendation moves from {rb['label']} to {ra['label']}.")
     else:

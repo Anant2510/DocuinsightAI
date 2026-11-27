@@ -75,7 +75,8 @@ def test_review_path_requests_evidence_and_explains_the_absence(svc):
     assert missing["status"] == "missing" and any("uploaded under 'Packing list' but reads as Air waybill" in s for s in missing["reasoning"])
     assert status(c, "RULE-commodity_consistency") == "review" and status(c, "RULE-claim_window") == "pass"
     window = next(f for f in a["findings"] if f["id"] == "RULE-claim_window")
-    assert window["data"]["days"] == 17 and window["rule"] == {"id": "claim_window", "version": "1.0", "title": window["title"], "note": window["rule"]["note"], "type": "date_interval"}
+    assert window["data"]["days"] == 17 and window["rule"] == {"id": "claim_window", "version": "1.0", "title": window["title"], "note": window["rule"]["note"], "type": "date_interval",
+                                                                 "params": {"from": "declaration.acceptance_date", "to": "case.received_date", "max_days": 1095}}, "a finding carries the rule as it stood when it ran"
     assert [r["agent"] for r in a["runs"]] == ["intake", "classify", "extract", "privacy", "resolve", "screening", "graph", "evidence", "reference", "policy", "contradiction", "integrity",
                                                "verification", "triage"]
     assert all(r["status"] == "ok" and r["model"] == "none (code)" for r in a["runs"]) and a["metrics"]["model_calls"] == 0
@@ -326,7 +327,7 @@ def test_claude_over_the_messages_api_on_the_layers_tiers(svc, tmp_path):
 
 
 # ------------------------------------------------------------------------------------------------ every use case, on the same engine
-EXPECTED = {"supplier_invoice": {"clean": "proceed", "mismatch": "review", "duplicate": "review", "payment_change": "review"}, "insurance_claim": {"clean": "proceed", "out_of_cover": "review"},
+EXPECTED = {"supplier_invoice": {"clean": "proceed", "mismatch": "review", "duplicate": "review", "payment_change": "review"}, "insurance_claim": {"clean": "proceed", "out_of_cover": "review", "us_clean": "proceed", "india_clean": "proceed", "india_lapsed": "review"},
             "loan_application": {"clean": "proceed", "income_mismatch": "review"},
             "customs_claim": {"review": "request_evidence", "positive": "proceed", "contradiction": "review", "temporal": "review"}, "trade_finance": {"discrepant": "review", "listed": "review"}}
 
@@ -370,7 +371,8 @@ def test_every_use_case_reaches_its_outcome_and_every_agent_keeps_its_contract(s
     known = twice["learned"]["knowledge"]   # what the orchestration board's knowledge bar shows
     assert set(known["levels"]) == {"industry", "domain", "solution", "customer"} and sum(known["levels"].values()) == known["entities"]
     late = assessed(svc, "out_of_cover", "insurance_claim")["assessment"]
-    assert {f["id"] for f in late["findings"] if f["status"] in ("fail", "missing")} == {"RULE-loss_before_cover_end", "RULE-estimate_supports_claim", "EV-incident"}
+    assert {f["id"] for f in late["findings"] if f["status"] in ("fail", "missing")} == {"RULE-loss_before_cover_end", "RULE-estimate_supports_claim", "EV-incident",
+                                                                                         "RULE-loss_inside_recorded_cover", "RULE-loss_while_premium_paid"}, "the schedule and the record both say the loss is outside the cover"
     loan = assessed(svc, "income_mismatch", "loan_application")["assessment"]
     assert loan["unresolved"] and loan["unresolved"][0]["a_name"] != loan["unresolved"][0]["b_name"], "two employer names that are only similar are left for a person"
 

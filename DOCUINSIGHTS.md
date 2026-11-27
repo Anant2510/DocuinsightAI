@@ -43,7 +43,8 @@ Nothing in the engine names a customer or an industry. A use case is a **profile
 | `entities` | which fields are party mentions (and in which role), goods descriptions, references, product characteristics |
 | `evidence` | mandatory, conditional (`when: case.<flag>`) and alternative (`any_of`) evidence |
 | `reference_sources` | external references to retrieve for a date, and classification aids over a hierarchy |
-| `rules` | deterministic rules: `date_interval`, `date_order`, `amounts_match`, `amount_limit`, `codes_consistent` |
+| `systems` | the systems of record the use case checks against: what a record is looked up by and the fields it carries (see *Systems of record and connectors*) |
+| `rules` | deterministic rules: `date_interval`, `date_order`, `amounts_match`, `amount_limit`, `value_in`, `value_limit`, `required_field`, `codes_consistent`; any of them may carry `applies_when` (only for a region, a product, a channel: `is`, `in`; or everywhere but: `not_in`). A rule reads a document's field, a case fact or a record's field alike |
 | `consistency` | the same fact compared across documents, by kind: `party`, `number`, `text`, `ref` |
 | `outcomes`, `correspondence`, `counterfactuals` | the wording of the three outcomes, letter templates, named what-if scenarios |
 | `synonyms` | the governed vocabulary (the feedback loop proposes additions; nothing is added without approval) |
@@ -56,7 +57,7 @@ Five profiles ship, to show the same engine on unrelated domains. The plainest c
 | Profile | Who runs it | What it checks | Samples |
 | --- | --- | --- | --- |
 | `supplier_invoice` | Finance operations | an invoice against its purchase order and proof of receipt (a three-way match); an invoice already seen | clean, mismatch, duplicate |
-| `insurance_claim` | Insurance | a claim against its policy schedule: cover dates, notification, the amount, the names | clean, out_of_cover |
+| `insurance_claim` | Insurance | a claim against its policy schedule and against the policy administration record: is the policy in force, was the premium paid, cover dates, notification by region, the amount, the names | clean, out_of_cover, us_clean, india_clean, india_lapsed |
 | `loan_application` | Banking and lending | what an applicant declared against the payslip, the bank statement and the employer's letter | clean, income_mismatch |
 | `customs_claim` | Customs and trade | evidence, consistency, and a tariff heading read for the case's relevant date | review, positive, contradiction, temporal |
 | `trade_finance` | Trade finance | a presentation under a documentary credit against the credit's terms | discrepant |
@@ -65,7 +66,8 @@ A new use case (onboarding, procurement, compliance, grants, anything that arriv
 a new file: no code changes and no new agents. Point
 `DOCUINSIGHTS_PROFILES_DIR` at a folder to add profiles without touching the package. The rules, tolerances and
 classification aids in the shipped profiles are **illustrative**: replace them with the approved policy of whoever
-uses the profile.
+uses the profile. That needs no file and no developer: the **Rules** screen and the rules sheet are how a business
+makes the rules its own (next section but one).
 
 ## The agents
 
@@ -166,7 +168,7 @@ the profile when it is loaded, with the reason.
 ## The foundation under the agents
 
 Six things every agent runs on, the same for every use case. The workbench shows how each stands under
-**How it is governed**; `GET /api/platform` returns the same as JSON.
+**Governance**; `GET /api/platform` returns the same as JSON.
 
 ### Agent contracts
 
@@ -418,6 +420,127 @@ At a limit a model call waits. Past the wait it is not made: the agent falls bac
 is marked degraded and says how many calls were not made. Nothing fails because the model is busy. On the CX Nova
 layer the model limiter and the budgets apply; the API gate does not (the layer applies its own).
 
+### Rules a business makes its own
+
+The rules that ship are a starting point with sample limits. The **Rules** screen is where the people who own the
+policy make them theirs, without code and without a restart:
+
+* **Read.** Every rule of a use case in one sentence a caseworker can read ("No more than 7 days between Claim form ·
+  Date of loss and Case record · Date notified, when Policy administration · Region is IN"), where it comes from
+  (shipped, changed here, added here), its version, and whether it is on.
+* **Change.** A limit, a tolerance, a list of values, the condition a rule applies under. Switch a rule, a document
+  requirement or a cross-document check off (a reason is asked for and kept), and back on. Take a changed rule back to
+  how it shipped.
+* **Add.** A rule of one of eight kinds, or a document requirement, built from pick-lists of the values the use case
+  reads. A rule is declared, never programmed: nothing a person types here is executed.
+* **Test.** Run a rule, as written or as about to be saved, against a case that has been assessed. The answer is the
+  finding it would raise. Nothing is saved by a test.
+* **Sheet.** *Download the rules sheet* gives a workbook: the rules in force, a sheet on how each kind is written, and
+  a sheet of the names a rule can use. A claims or operations team fills it in; *Import a filled-in sheet* shows what
+  each row would do (add, change, switch off, nothing, refused and why) before anything changes. The workbook comes
+  back from Excel or any spreadsheet as it is; the same sheet as CSV is accepted too (comma, semicolon or tab; UTF-8
+  or the Windows code page). A cell that begins like a formula is only ever read as text.
+
+| Kind | What it checks | Example |
+| --- | --- | --- |
+| `date_order` | one date is on or before another | the loss happened on or before the end of cover |
+| `date_interval` | no more than a number of days between two dates | notified within 30 days of the loss |
+| `amount_limit` | an amount is within a limit read from a document or a record | the claim is within the sum insured |
+| `amounts_match` | amounts agree within a tolerance | the estimate supports the amount claimed |
+| `value_in`, `value_not_in` | a value is one of, or none of, a list | the policy status is "in force" |
+| `value_limit` | a number or an amount is within bounds you state | a claim above 40,000 goes to a senior handler |
+| `required_field` | a value must have been found | the claim form states a policy number |
+| `document_required` | a kind of document must be in the package | an incident report on every claim |
+
+**Versions, and what an old case shows.** A workspace's changes are kept beside the shipped profile
+(`<data>/<tenant>/rules/<profile>.json`), never in it: an upgrade brings new shipped rules and keeps the workspace's
+own. Every change makes a new version of the workbook, with who made it, when and why, and is written to the
+provenance ledger with the rule before and after. A changed rule carries the version `<shipped>+w<n>`, an added one
+`w<n>`. An assessment records the version of the workbook it was made on, and **each finding carries the rule as it
+stood** (its limit, its values, its condition). So a case assessed in March shows the 30 days that applied in March,
+whatever the rule says today; assessing it again applies today's rule and keeps the earlier assessment in its
+history. The decision record prints both. A what-if on a case assessed under older rules says so.
+
+A change applies from the next assessment, on every path: the workbench, the API, and the layer's agents.
+
+API: `GET /api/v1/rules/{profile}`; `POST /api/v1/rules/{profile}` with one change or `{"changes": [...]}` (all are
+checked before any is kept): `{"do": "set", "rule": {...}, "note"}`, `{"do": "off" | "on", "group": "rules" |
+"evidence" | "consistency", "id", "note"}`, `{"do": "reset", "id"}`, `{"do": "require", "evidence": {...}}`. On the
+workbench's own API: `GET /api/rules/{profile}/template.xlsx` (or `.csv`), `POST /api/rules/{profile}/import`
+(`{"content_base64"}` or `{"text"}`, with `"apply": true` to make the changes), `POST /api/rules/{profile}/test`.
+
+**Who may change them.** Set `DOCUINSIGHTS_ADMIN_KEY` and a change to the rules, to prices and limits, to the
+knowledge base or to what the product has learned must carry that key (`X-DocuInsights-Admin`; the workbench asks for
+it once per browser tab). Reading, testing a rule, previewing a sheet and all casework need only the ordinary key.
+Stopping is never held back: anyone may stop a case or pause the workspace, and only the administrator resumes it.
+Without the setting, anyone who can use the workbench can make these changes, and the Rules screen says so.
+
+### Systems of record and connectors
+
+A document says a policy is in force. The policy administration system knows whether it is. A use case names the
+systems it checks against (`systems:` in its profile: what to look a record up by, and the fields a record carries),
+and a rule then reads `record.<system>.<field>` exactly as it reads `<document>.<field>`. The insurance profile checks
+that the policy is in force on the record, that the loss falls inside the cover and the paid-up period on the record,
+that the claim is within the sum insured on the record, that the holder and the vehicle on the record are the ones on
+the claim, and applies the notification period of the record's region.
+
+The **Connectors** screen shows the three places a case meets the systems around it, as they are configured now:
+
+| Hook | What it is | Standing in today | Your system in its place |
+| --- | --- | --- | --- |
+| Where cases come in | `POST /api/v1/cases` with the documents, or with `"source": "repository"` to pull the package from the content repository; the workbench; the layer's `di_intake` | uploads, and a folder repository | `DOCUINSIGHTS_REPOSITORY=omnidocs`, or a call from your workflow |
+| What they are checked against | one lookup per system of record per assessment, by the key the documents state | a synthetic policy administration system for the United States and India | the settings or the adapter below |
+| Where the answer goes | the result as JSON, the decision record, a signed notification when a case is assessed or decided, filing to the repository, and the decision a person made elsewhere written back (`POST /api/v1/cases/{reference}/decision`) | a folder repository; notification off | `DOCUINSIGHTS_WEBHOOK_URL`, `DOCUINSIGHTS_REPOSITORY` |
+
+**One contract, whatever stands behind it.**
+
+```
+lookup(system, key) -> {"status": "found" | "not_found" | "unavailable" | "not_configured" | "not_asked",
+                        "record": {<field>: value, ...}, "connector", "demonstration", "ms", "reason"}
+```
+
+Three rules hold for every connector. *Not found* means the system answered and holds no such record: the rule that
+needs it fails and says so. *Unavailable* means the system did not answer, answered with an error, or answered with
+something that is not a record: the rules that need it go to a person, and **nothing is concluded from the silence**.
+And the answer is the record as it stood at the assessment: it is kept with the assessment, printed in the decision
+record, and every lookup is timed and written to the provenance ledger. A what-if reuses that record; it does not ask
+again.
+
+**The synthetic policy administration system** (`reference/policy_admin.json`) is invented data that behaves like a
+real one: policies for two regions (US: in force, cancelled for non-payment; India: in force, lapsed), with status,
+holder, vehicle, cover dates, sum insured, excess and the date the premium is paid to. Every screen, finding and
+record that rests on it says it is demonstration data. `DOCUINSIGHTS_SYNTHETIC_SYSTEMS=0` switches it off for an
+installation that must never run on invented records; a system with no connector then says "not configured" and
+every case goes to a person.
+
+**Connecting the real system** needs no change to the engine, the rules or the screens. Settings are
+`DOCUINSIGHTS_SYSTEM_<ID>_<NAME>` (for the policy system above, `DOCUINSIGHTS_SYSTEM_POLICY_ADMIN_URL` and so on):
+
+| Setting | Meaning |
+| --- | --- |
+| `URL` | `https://host/policies/{key}`; `{key}` is the value looked up, URL-encoded as one path segment |
+| `TOKEN`, `HEADERS` | a bearer token; JSON of further headers. Never shown on a screen, in a case, in a log or in the ledger |
+| `METHOD`, `BODY` | `GET` (default) or `POST` with the JSON to send; `{key}` inside any text of it is the value looked up |
+| `RECORD` | where the record sits in the answer (`data.policy`). A list there is read as its first row; an empty list is "not found" |
+| `NOT_FOUND` | the answer that means "no such record" when the system says it with a 200: `status.code=E404\|E410` |
+| `OK` | the answer that means "a good answer": `result.code=OK`. Given, anything else is "unavailable" with what the system said |
+| `MAP` | JSON `{"<field>": "path.in.the.record"}` where your record names things differently |
+| `TIMEOUT_S` | seconds to wait (default 10) |
+| `ADAPTER` | `package.module:function`: your own code instead, where settings are not enough |
+
+An **adapter** is one function, `lookup(system, key, settings) -> {"status", "record", "reason"}`, for a system that
+needs a session, two calls joined, SOAP or a database. It is held to the same contract: an answer that is not one of
+the three statuses, a record with none of the declared fields, or anything it raises is "unavailable". The package
+`docuinsights.adapters` documents the contract; `docuinsights.adapters.newgen_rest` is a reference adapter in the REST
+style of NewgenONE's services (one named request object carrying the cabinet and the caller's credentials, one named
+response object carrying its own status), with every name of the operation and its fields a setting. *Test a lookup*
+on the Connectors screen asks the configured system for one key and shows what came back and how long it took.
+
+What this does not close: the reference adapter is a pattern, not a tested integration. It has been run against a
+stand-in that answers in that style, not against a live system. Which service returns a policy at a given customer,
+its field names, its error codes and its credentials are found on first contact. The contract, the settings and the
+tests are there so that first contact is configuration and a mapping, not a rebuild.
+
 ### Spend, limits and stops
 
 Every model call any agent makes is counted where it is made, in the harness, against the case it was made for: which
@@ -428,7 +551,7 @@ them. Reading a document again costs nothing unless the document changed.
 
 | What | Setting | On the portal |
 | --- | --- | --- |
-| price for a million tokens in and out, and its currency | `DOCUINSIGHTS_PRICE_INPUT`, `DOCUINSIGHTS_PRICE_OUTPUT`, `DOCUINSIGHTS_PRICE_CURRENCY` | How it is governed, Spend and limits |
+| price for a million tokens in and out, and its currency | `DOCUINSIGHTS_PRICE_INPUT`, `DOCUINSIGHTS_PRICE_OUTPUT`, `DOCUINSIGHTS_PRICE_CURRENCY` | Governance, Spend and limits |
 | a price for one model by name | `DOCUINSIGHTS_PRICES` (JSON: `{"<model>": {"input": 3, "output": 15}}`) | no |
 | tokens one case may use | `DOCUINSIGHTS_CASE_TOKEN_LIMIT` | yes |
 | money one case may cost | `DOCUINSIGHTS_CASE_COST_LIMIT` | yes |
@@ -496,6 +619,9 @@ model once at start and prints `ONLINE`, or the reason it is not answering (it s
 | `FOUNDRY_DEPLOYMENT_FAST`, `_BALANCED`, `_PRO`, `_COMPLEX` | the deployment behind each tier on Foundry, the same names the layer reads (defaults `claude-sonnet-5-5`, `claude-sonnet-5-5`, `claude-opus-5`, `claude-opus-5`). DocuInsights asks for `fast` to classify and `balanced` for everything else |
 | `DOCUINSIGHTS_MODEL` | one model or deployment for every tier (`DOCUINSIGHTS_MODEL_FAST` ... override one tier) |
 | `DOCUINSIGHTS_API_KEY` | required on every `/api` call when set; without it the API answers 127.0.0.1 only |
+| `DOCUINSIGHTS_ADMIN_KEY` | when set, a change to the rules, prices and limits, the knowledge base or what was learned must also carry this key (`X-DocuInsights-Admin`) |
+| `DOCUINSIGHTS_SYSTEM_<ID>_URL`, `_TOKEN`, `_HEADERS`, `_METHOD`, `_BODY`, `_RECORD`, `_NOT_FOUND`, `_OK`, `_MAP`, `_TIMEOUT_S`, `_ADAPTER` | the connector to a system of record (see *Systems of record and connectors*) |
+| `DOCUINSIGHTS_SYNTHETIC_SYSTEMS` | `0`: never answer from the bundled demonstration records |
 | `DOCUINSIGHTS_ROOT_PATH` | the prefix when it sits behind a reverse proxy (`/docuinsights`) |
 | `DOCUINSIGHTS_REFERENCE_LIVE` | `1` reads reference sources live; otherwise the bundled snapshot is used and labelled |
 | `DOCUINSIGHTS_REPOSITORY` | `local` (default) or `omnidocs` |
@@ -550,17 +676,23 @@ Three seams, in the order they are usually needed:
    (`OMNIDOCS_DATACLASS_INDEX`, `OMNIDOCS_DATACLASS_NAME`, `OMNIDOCS_FIELD_MAP`). Filing a case adds each document
    through `addDocumentJSON` with the case reference, document type, classification confidence, recommendation and
    assessment id as data-class fields.
-3. **A NewgenONE process calls DocuInsights as a step.** `POST /api/v1/cases` with `{reference, profile, fields,
+3. **A record held in NewgenONE.** A system of record reached through NewgenONE's REST services is connected with
+   `DOCUINSIGHTS_SYSTEM_<ID>_ADAPTER=docuinsights.adapters.newgen_rest:lookup` and the names of the operation, its
+   request and response objects and its fields as settings (see *Systems of record and connectors*).
+4. **A NewgenONE process calls DocuInsights as a step.** `POST /api/v1/cases` with `{reference, profile, fields,
    documents: [{name, category, content_base64}], wait: true}` returns the assessment: outcome, reasons, what to
    request, each document's type and fields, every finding. `wait: false` answers 202; read
-   `GET /api/v1/cases/{reference}`. On the layer the same work is `POST /flows/di_case_assessment/run`, or the MCP
-   and A2A surfaces.
+   `GET /api/v1/cases/{reference}`. The result names the version of the rules it was made on and what each system
+   of record answered. Where the person decides in the process, `POST /api/v1/cases/{reference}/decision` writes the
+   decision back so that the decision record is complete. On the layer the same work is
+   `POST /flows/di_case_assessment/run`, or the MCP and A2A surfaces.
 
 **Not yet verified against a live system.** The OmniDocs connector is written from the *NewgenONE OmniDocs 11.3 REST
 Web Services Developer Guide* and has not been run against a cabinet: expect to adjust the request envelope in
 `OmniDocsRepository._bdo` / `.add_document` on first contact. Folder creation and search are not used (documents go to
-one configured folder). Whether a NewgenONE agent can call an external agent over MCP is for Newgen to confirm; the
-REST call above does not depend on it.
+one configured folder). The reference adapter for a record (`adapters/newgen_rest.py`) is written in the same style and has likewise only
+been run against a stand-in. Whether a NewgenONE agent can call an external agent over MCP is for Newgen to confirm;
+the REST call above does not depend on it.
 
 ## Reference sources
 
@@ -580,7 +712,8 @@ asked for, when it was retrieved, a hash of the content and its version are kept
 
 ## Sample data
 
-Every company, reference, account and amount in `src/docuinsights/samples/` is invented.
+Every company, person, policy, reference, account and amount in `src/docuinsights/samples/` and in
+`src/docuinsights/reference/policy_admin.json` is invented.
 `python scripts/build_docuinsights_samples.py` regenerates the documents (needs `reportlab`; `pdftoppm` for the one
 scanned sample, which carries its transcription beside it so the demo runs without a model or an OCR engine).
 
@@ -606,7 +739,13 @@ weekends; a case written by the version before; Word, Excel, email, web page and
 an API without its key; every model call counted against its case, by document, agent and kind of work; prices, and
 calls made before a price was set; limits for a case, a document and a cost; model use and a whole assessment stopped
 while they run; a workspace paused; a known model costed at its list price until a price is stated; the Observability
-figures against the case files. Together the two files hold 233 tests. They read no setting of the machine they run
+figures against the case files; a policy in force, lapsed and cancelled on the record in two regions; a system of
+record that is down, answers with an error page, wraps its answer, says "no such record" with a 200, or returns rows;
+an adapter that raises, returns nonsense or invents a status; a credential that must appear nowhere; rules changed,
+added, switched off and taken back, with every finding keeping the rule as it stood; twenty-four changes that must be
+refused; a rules workbook filled in and saved by a spreadsheet; a sheet in the Windows code page and with semicolons;
+a formula in a cell; an administrator key that casework does not need and governance does. Together the two files
+hold 286 tests. They read no setting of the machine they run
 on, and pass with and without an OCR engine installed.
 
 ## What is not built yet
@@ -627,9 +766,21 @@ on, and pass with and without an OCR engine installed.
   not as a finding.
 * **Triage** counts Monday to Friday as working days and knows no public holidays, no working hours and no time
   zones. It names a queue; it does not balance work between people.
-* **Who is who.** The standalone workbench has one API key and a name each person types for the audit trail. It has
-  no user accounts, no roles and no rule that the person who reviews is not the person who approves. Mounted on the
-  layer, the layer's sign-in and customer keys apply.
+* **Who is who.** The standalone workbench has two keys: one to use it, and (when `DOCUINSIGHTS_ADMIN_KEY` is set)
+  one to change how it is governed. The name in the audit trail is the one each person types. It has no user
+  accounts, no single sign-on, no roles finer than those two, no second approval of a rule change, and no rule that
+  the person who reviews is not the person who approves. Mounted on the layer, the layer's sign-in and customer keys
+  apply.
+* **A real system of record.** The policy administration system that ships is invented data for two regions. The
+  connector to a real one is settings or an adapter, proven against stand-ins; no customer's system has been
+  connected. The regional notification periods (30 days, 7 days) are sample values, not a statement of any law or
+  policy wording.
+* **Rules** are of the kinds listed, each reading one or two values. There is no rule that sums rows, no rule
+  calling another rule, no scheduled start date for a change (a change applies from the next assessment), and the
+  rules sheet does not carry the cross-document checks (they are switched on and off on the screen). Moving a
+  workspace's rules to another installation is the sheet, or the file `<data>/<tenant>/rules/<profile>.json`.
+* **One lookup per system per assessment**, by one key. There is no bulk lookup, no caching between cases, no retry
+  beyond the timeout, and no write to a system of record: DocuInsights reads the record and never changes it.
 * **Retention.** A case is kept until someone removes its folder. There is no retention period, no erasure of one
   person's data across cases, and no legal hold.
 

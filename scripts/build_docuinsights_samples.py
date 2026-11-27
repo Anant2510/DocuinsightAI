@@ -257,6 +257,56 @@ def insurance_claim() -> None:
         ("Circumstances of Loss", "Collision with another vehicle at a junction; rear bumper and tailgate damaged"), ("Injuries", "None"), ("Third Party", "Yes, one other vehicle")])
 
 
+    # The same use case in two more regions. Each policy is on the demonstration policy administration record (reference/policy_admin.json).
+    us_insurer = "Cedar Ridge Mutual Insurance Company, 2200 Congress Avenue, Austin, TX 78701, United States"
+    us_holder = "Jordan Ellery, 418 Larkspur Drive, Plano, TX 75024, United States"
+    us_shop = "Lone Star Collision Center LLC, 905 Commerce Street, Plano, TX 75074, United States"
+    pdf(out / "us_policy_schedule.pdf", "Cedar Ridge Mutual Insurance Company", "PERSONAL AUTO POLICY DECLARATIONS", [
+        "Policy schedule (declarations page).", ("Policy Number", "PA-US-7730145"), ("Policyholder", us_holder), ("Insurer", us_insurer), ("Period of Insurance", "12 months"),
+        ("Cover Start Date", "15 January 2026"), ("Cover End Date", "14 January 2027"), "",
+        ("Cover", "Collision and comprehensive"), ("Coverage Limit", "USD 28,000.00"), ("Deductible", "USD 500.00"), ("Vehicle Identification Number", "5XYZT3LB8MG004417"),
+        ("Vehicle", "Mid-size sport utility vehicle, 2.5 liter gasoline, model year 2021"), ("State", "Texas")])
+    pdf(out / "us_claim_form.pdf", "Cedar Ridge Mutual Insurance Company - Claims", "AUTO CLAIM FORM", [
+        ("Claim Number", "CR-CLM-2026-118204"), ("Policy Number", "PA-US-7730145"), ("Claimant", us_holder), ("Date of Loss", "22 September 2026"), "",
+        ("Amount Claimed", "USD 3,480.00"), ("Vehicle Identification Number", "5XYZT3LB8MG004417"),
+        ("Circumstances of Loss", "Struck from behind while stationary at a stop light; rear bumper, liftgate and tail lamp damaged"), ("Injuries", "None"), ("Third Party", "None")])
+    pdf(out / "us_repair_estimate.pdf", "Lone Star Collision Center LLC", "REPAIR ESTIMATE", [
+        ("Estimate Number", "LSC-E-40917"), ("Repairer", us_shop), ("Customer", us_holder), ("Vehicle Identification Number", "5XYZT3LB8MG004417"), ("Estimate Date", "24 September 2026"), "",
+        ("Work Required", "Replace rear bumper cover and left tail lamp, repair and refinish liftgate"), ("Labour", "USD 1,420.00"), ("Parts", "USD 1,975.00"),
+        ("Estimate Total", "USD 3,395.00"), ("Valid For", "30 days")])
+    in_insurer = "Sahyadri General Insurance Company Limited, 4th Floor, Meridian Towers, Lower Parel, Mumbai 400013, India"
+    in_holder = "Meera Krishnan, 14 Lakeview Residency, Indiranagar, Bengaluru 560038, India"
+    in_shop = "Cauvery Motors Body Shop Private Limited, 77 Old Madras Road, Bengaluru 560016, India"
+    pdf(out / "in_policy_schedule.pdf", "Sahyadri General Insurance Company Limited", "PRIVATE CAR PACKAGE POLICY SCHEDULE", [
+        ("Policy Number", "PA-IN-2201987"), ("Policyholder", in_holder), ("Insurer", in_insurer), ("Period of Insurance", "12 months"),
+        ("Cover Start Date", "1 April 2026"), ("Cover End Date", "31 March 2027"), "",
+        ("Cover", "Own damage and third party liability"), ("Insured Declared Value", "INR 625,000.00"), ("Compulsory Deductible", "INR 2,000.00"), ("Registration Number", "KA 05 MN 4821"),
+        ("Vehicle", "Compact sedan, 1.2 litre petrol, first registered 2022")])
+    pdf(out / "in_claim_form.pdf", "Sahyadri General Insurance Company Limited - Motor Claims", "MOTOR CLAIM FORM", [
+        ("Claim Number", "SGI-MC-2026-0077431"), ("Policy Number", "PA-IN-2201987"), ("Claimant", in_holder), ("Date of Accident", "8 August 2026"), "",
+        ("Amount Claimed", "INR 48,600.00"), ("Registration Number", "KA 05 MN 4821"),
+        ("Circumstances of Loss", "Hit by a two-wheeler while parked on the roadside; front left door and fender dented"), ("Injuries", "None"), ("Third Party", "None")])
+    pdf(out / "in_repair_estimate.pdf", "Cauvery Motors Body Shop Private Limited", "REPAIR ESTIMATE", [
+        ("Estimate Number", "CMB-E-31288"), ("Repairer", in_shop), ("Customer", in_holder), ("Registration Number", "KA 05 MN 4821"), ("Estimate Date", "11 August 2026"), "",
+        ("Work Required", "Repair and repaint front left door, replace front left fender"), ("Labour", "INR 14,200.00"), ("Parts", "INR 33,100.00"),
+        ("Estimate Total", "INR 47,300.00"), ("Valid For", "30 days")])
+    lapsed_holder = "Arvind Subramanian, 22 Temple View Apartments, Mylapore, Chennai 600004, India"
+    lapsed_shop = "Marina Auto Works Private Limited, 310 Anna Salai, Chennai 600002, India"
+    pdf(out / "in_policy_schedule_lapsed.pdf", "Sahyadri General Insurance Company Limited", "PRIVATE CAR PACKAGE POLICY SCHEDULE", [
+        ("Policy Number", "PA-IN-2203310"), ("Policyholder", lapsed_holder), ("Insurer", in_insurer), ("Period of Insurance", "12 months"),
+        ("Cover Start Date", "12 September 2025"), ("Cover End Date", "11 September 2026"), "",
+        ("Cover", "Own damage and third party liability"), ("Insured Declared Value", "INR 480,000.00"), ("Compulsory Deductible", "INR 1,000.00"), ("Registration Number", "TN 09 CK 7715"),
+        ("Vehicle", "Hatchback, 1.0 litre petrol, first registered 2020"), ("Premium", "Payable in two instalments")])
+    pdf(out / "in_claim_form_lapsed.pdf", "Sahyadri General Insurance Company Limited - Motor Claims", "MOTOR CLAIM FORM", [
+        ("Claim Number", "SGI-MC-2026-0071902"), ("Policy Number", "PA-IN-2203310"), ("Claimant", lapsed_holder), ("Date of Accident", "29 June 2026"), "",
+        ("Amount Claimed", "INR 36,900.00"), ("Registration Number", "TN 09 CK 7715"),
+        ("Circumstances of Loss", "Skidded on a wet road and struck a median; front bumper and radiator grille damaged"), ("Injuries", "None"), ("Third Party", "None")])
+    pdf(out / "in_repair_estimate_lapsed.pdf", "Marina Auto Works Private Limited", "REPAIR ESTIMATE", [
+        ("Estimate Number", "MAW-E-18845"), ("Repairer", lapsed_shop), ("Customer", lapsed_holder), ("Registration Number", "TN 09 CK 7715"), ("Estimate Date", "1 July 2026"), "",
+        ("Work Required", "Replace front bumper and radiator grille, align bonnet"), ("Labour", "INR 9,800.00"), ("Parts", "INR 26,400.00"),
+        ("Estimate Total", "INR 36,200.00"), ("Valid For", "30 days")])
+
+
 # ------------------------------------------------------------------------------------------------ loan application
 def loan_application() -> None:
     out = OUT / "loan_application"

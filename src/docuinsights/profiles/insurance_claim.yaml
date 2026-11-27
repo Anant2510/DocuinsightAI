@@ -8,7 +8,7 @@ name: Insurance claim review
 order: 20
 sector: Insurance
 plain: "Check a claim against the policy: was the loss inside the cover, is the amount supported, do the documents agree?"
-version: "1.0"
+version: "1.1"
 description: A claim checked against its policy schedule and the evidence of the loss for cover dates, notification, amounts and consistency.
 
 brand:
@@ -34,9 +34,9 @@ document_types:
       - {id: claim_number, name: Claim number, type: ref, labels: [Claim Number], required: true}
       - {id: policy_number, name: Policy number, type: ref, labels: [Policy Number], required: true}
       - {id: claimant, name: Claimant, type: party, labels: [Claimant], required: true, personal: true}
-      - {id: loss_date, name: Date of loss, type: date, labels: [Date of Loss], required: true}
+      - {id: loss_date, name: Date of loss, type: date, labels: [Date of Loss, Date of Accident], required: true}
       - {id: claimed_amount, name: Amount claimed, type: money, labels: [Amount Claimed], required: true}
-      - {id: vehicle, name: Vehicle registration, type: ref, labels: [Vehicle Registration]}
+      - {id: vehicle, name: Vehicle registration, type: ref, labels: [Vehicle Registration, Registration Number, Vehicle Identification Number]}
       - {id: circumstances, name: Circumstances of loss, type: text, labels: [Circumstances of Loss]}
   - id: policy_schedule
     name: Policy schedule
@@ -48,9 +48,9 @@ document_types:
       - {id: insurer, name: Insurer, type: party, labels: [Insurer]}
       - {id: cover_start, name: Cover start, type: date, labels: [Cover Start Date], required: true}
       - {id: cover_end, name: Cover end, type: date, labels: [Cover End Date], required: true}
-      - {id: sum_insured, name: Sum insured, type: money, labels: [Sum Insured], required: true}
-      - {id: excess, name: Policy excess, type: money, labels: [Policy Excess]}
-      - {id: vehicle, name: Vehicle registration, type: ref, labels: [Vehicle Registration]}
+      - {id: sum_insured, name: Sum insured, type: money, labels: [Sum Insured, Insured Declared Value, Coverage Limit], required: true}
+      - {id: excess, name: Policy excess, type: money, labels: [Policy Excess, Deductible, Compulsory Deductible]}
+      - {id: vehicle, name: Vehicle registration, type: ref, labels: [Vehicle Registration, Registration Number, Vehicle Identification Number]}
   - id: repair_estimate
     name: Repair estimate
     group: loss
@@ -59,7 +59,7 @@ document_types:
       - {id: estimate_number, name: Estimate number, type: ref, labels: [Estimate Number], required: true}
       - {id: repairer, name: Repairer, type: party, labels: [Repairer], required: true}
       - {id: customer, name: Customer, type: party, labels: [Customer], personal: true}
-      - {id: vehicle, name: Vehicle registration, type: ref, labels: [Vehicle Registration]}
+      - {id: vehicle, name: Vehicle registration, type: ref, labels: [Vehicle Registration, Registration Number, Vehicle Identification Number]}
       - {id: estimate_date, name: Estimate date, type: date, labels: [Estimate Date]}
       - {id: labour, name: Labour, type: money, labels: [Labour]}
       - {id: parts, name: Parts, type: money, labels: [Parts]}
@@ -102,7 +102,77 @@ evidence:
   - {id: loss, title: Repair estimate, any_of: [repair_estimate], required: always}
   - {id: incident, title: Incident report, any_of: [incident_report], required: when, when: case.third_party_involved, note: Required when a third party was involved}
 
+# The systems of record this use case checks against. What the documents say is compared with what the business already holds.
+# The connector is the installation's choice (systems.py): its own policy administration over REST, or, until then, the
+# demonstration records shipped with this build for the United States and India.
+systems:
+  - id: policy_admin
+    name: Policy administration
+    key: claim_form.policy_number
+    note: The schedule a claimant sends shows the cover as it was sold. The policy administration system knows whether it is still in force.
+    fields:
+      - {id: status, name: Policy status, type: text}
+      - {id: region, name: Region, type: text}
+      - {id: policyholder, name: Policyholder on record, type: party}
+      - {id: vehicle, name: Vehicle on record, type: ref}
+      - {id: cover_start, name: Cover start on record, type: date}
+      - {id: cover_end, name: Cover end on record, type: date}
+      - {id: sum_insured, name: Sum insured on record, type: money}
+      - {id: excess, name: Excess on record, type: money}
+      - {id: premium_paid_to, name: Premium paid to, type: date}
+      - {id: status_reason, name: Reason for the status, type: text}
+
 rules:
+  - id: policy_in_force
+    family: record
+    title: The policy is in force on the record
+    type: value_in
+    field: record.policy_admin.status
+    values: [in force]
+    version: "1.0"
+    note: A schedule can look valid after the policy has lapsed or been cancelled. The record decides.
+  - id: loss_inside_recorded_cover
+    family: record
+    title: The loss happened on or before the end of cover on the record
+    type: date_order
+    first: claim_form.loss_date
+    then: record.policy_admin.cover_end
+    version: "1.0"
+  - id: loss_while_premium_paid
+    family: record
+    title: The premium was paid up to the date of the loss
+    type: date_order
+    first: claim_form.loss_date
+    then: record.policy_admin.premium_paid_to
+    version: "1.0"
+  - id: within_recorded_sum_insured
+    family: record
+    title: The amount claimed is within the sum insured on the record
+    type: amount_limit
+    amount: claim_form.claimed_amount
+    limit: record.policy_admin.sum_insured
+    tolerance_pct: 0
+    version: "1.0"
+  - id: notified_in_time_us
+    family: timing
+    title: "United States: the claim was notified within the permitted period"
+    type: date_interval
+    from: claim_form.loss_date
+    to: case.notified_date
+    max_days: 30
+    applies_when: {ref: record.policy_admin.region, is: US}
+    version: "1.0"
+    note: A sample period. Replace it with the notice condition of your policy wording and of the state concerned.
+  - id: notified_in_time_in
+    family: timing
+    title: "India: the claim was notified within the permitted period"
+    type: date_interval
+    from: claim_form.loss_date
+    to: case.notified_date
+    max_days: 7
+    applies_when: {ref: record.policy_admin.region, is: IN}
+    version: "1.0"
+    note: A sample period. Replace it with the intimation condition of your policy wording and your regulator's requirement.
   - id: loss_after_cover_start
     family: cover
     title: The loss happened on or after the start of cover
@@ -124,8 +194,9 @@ rules:
     from: claim_form.loss_date
     to: case.notified_date
     max_days: 30
+    applies_when: {ref: record.policy_admin.region, not_in: [US, IN]}
     version: "1.0"
-    note: Illustrative 30 days from the date of loss to notification.
+    note: An illustrative period from the date of loss to notification, where no regional rule applies.
   - id: within_sum_insured
     family: value
     title: The amount claimed is within the sum insured
@@ -141,11 +212,15 @@ rules:
     amounts: [claim_form.claimed_amount, repair_estimate.estimate_total]
     tolerance_pct: 5
     version: "1.0"
-    note: Illustrative 5 percent tolerance between the claim and the estimate.
+    note: An illustrative tolerance between the claim and the estimate.
 
 consistency:
   - {id: claimant, family: parties, title: The claimant is the policyholder, kind: party, severity: high,
      fields: [claim_form.claimant, policy_schedule.policyholder, repair_estimate.customer]}
+  - {id: holder_on_record, family: record, title: The policyholder on the schedule is the one on the record, kind: party, severity: high,
+     fields: [policy_schedule.policyholder, record.policy_admin.policyholder]}
+  - {id: vehicle_on_record, family: record, title: The vehicle claimed for is the one on the record, kind: ref, severity: high,
+     fields: [claim_form.vehicle, record.policy_admin.vehicle]}
   - {id: policy_number, family: cover, title: The claim quotes the policy it is made under, kind: ref, severity: high,
      fields: [claim_form.policy_number, policy_schedule.policy_number]}
   - {id: vehicle, family: loss, title: The same vehicle on every document, kind: ref, severity: high,
@@ -206,6 +281,33 @@ samples:
       - {file: claim_form.pdf, category: claim_form}
       - {file: policy_schedule.pdf, category: policy_schedule}
       - {file: repair_estimate.pdf, category: repair_estimate}
+  - id: us_clean
+    title: "United States: claim inside the cover"
+    story: "A personal auto claim in Texas, in US dollars. The policy administration record says the policy is in force and the premium is paid; the loss, the amount and the documents agree."
+    path: insurance_claim
+    case: {reference: CLAIM-US-2026-40311, notified_date: "2026-09-25", received_date: "2026-09-29", third_party_involved: "no"}
+    documents:
+      - {file: us_claim_form.pdf, category: claim_form}
+      - {file: us_policy_schedule.pdf, category: policy_schedule}
+      - {file: us_repair_estimate.pdf, category: repair_estimate}
+  - id: india_clean
+    title: "India: claim inside the cover"
+    story: "A private car claim in Bengaluru, in rupees. The record says the policy is in force; the claim was intimated within the period for India and the documents agree."
+    path: insurance_claim
+    case: {reference: CLAIM-IN-2026-51877, notified_date: "2026-08-12", received_date: "2026-08-17", third_party_involved: "no"}
+    documents:
+      - {file: in_claim_form.pdf, category: claim_form}
+      - {file: in_policy_schedule.pdf, category: policy_schedule}
+      - {file: in_repair_estimate.pdf, category: repair_estimate}
+  - id: india_lapsed
+    title: "India: the schedule looks valid, the record says lapsed"
+    story: "Every document agrees and the schedule shows cover to September. The policy administration record says the policy lapsed in March, when an instalment of premium was not received. Only the record shows it."
+    path: insurance_claim
+    case: {reference: CLAIM-IN-2026-52240, notified_date: "2026-07-03", received_date: "2026-07-08", third_party_involved: "no"}
+    documents:
+      - {file: in_claim_form_lapsed.pdf, category: claim_form}
+      - {file: in_policy_schedule_lapsed.pdf, category: policy_schedule}
+      - {file: in_repair_estimate_lapsed.pdf, category: repair_estimate}
   - id: out_of_cover
     title: Loss after the cover ended
     story: "The loss is dated after the cover ended, the amount claimed is well above the estimate, and a third party was involved but no incident report was sent."

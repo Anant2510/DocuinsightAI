@@ -116,6 +116,9 @@ def declared_rules(profile: Profile) -> list[dict[str, Any]]:
     if cfg.get("issued"):
         out.append({"key": "integrity.dates", "title": DATES_TITLE, "kind": "date plausibility", "family": "integrity", "version": ver,
                     "note": "A document cannot be dated in the future, or implausibly long ago.", "params": [f"max_age_years={cfg.get('max_age_years', 15)}"], "types": types(cfg["issued"])})
+    for sysd in getattr(profile, "systems", []) or []:
+        out.append({"key": f"systems.{sysd['id']}", "title": f"The case is on record in {sysd.get('name') or sysd['id']}", "kind": "system of record lookup", "family": "record", "version": ver,
+                    "note": sysd.get("note") or "What the documents say is checked against what the business already holds.", "params": [f"key={sysd.get('key')}"], "types": types([sysd.get("key") or ""])})
     out.append({"key": "integrity.amounts", "title": AMOUNTS_TITLE, "kind": "amount plausibility", "family": "integrity", "version": ver,
                 "note": "A credit is a different document from the one a use case expects.", "params": [], "types": set()})
     out.append({"key": "integrity.duplicate_documents", "title": DUPLICATE_TITLE, "kind": "duplicate file", "family": "integrity", "version": ver,
@@ -273,7 +276,13 @@ def personal_names(case: dict[str, Any], profile: Profile) -> list[str]:
             got = (d.get("fields") or {}).get(f["id"]) if f.get("personal") else None
             if got and got.get("value"):
                 out += [str(got["value"]), V.party_name(got["value"])]
-    return list(dict.fromkeys(out))
+    answered = ((case.get("assessment") or {}).get("systems") or {})   # a system of record names people too: the holder on the record is masked like the one on the form
+    for sysd in getattr(profile, "systems", None) or []:
+        rec = (answered.get(sysd["id"]) or {}).get("record") or {}
+        for f in sysd.get("fields") or []:
+            if (f.get("personal") or f.get("type") == "party") and rec.get(f["id"]):
+                out += [str(rec[f["id"]]), V.party_name(rec[f["id"]])]
+    return list(dict.fromkeys(x for x in out if x))
 
 
 def privacy(case: dict[str, Any], profile: Profile) -> dict[str, Any]:

@@ -75,6 +75,19 @@ def assertions(case: dict[str, Any], profile: Profile, ref: str) -> list[dict[st
         return [{"ref": ref, "doc": "case", "doc_name": "Case record", "type": "case", "version": 0, "field": fld, "field_name": profile.field_name(ref),
                  "value": case["fields"].get(fld), "norm": norm, "ftype": ftype, "confidence": 1.0, "page": None, "line": None,
                  "snippet": f"{profile.field_name(ref)}: {case['fields'].get(fld)}", "verified": True, "method": "case record"}]
+    if head == "record":   # record.<system>.<field>: what a system of record holds for this case (fetched by the reference agent)
+        sid, _, name = fld.partition(".")
+        got = ((case.get("working") or case.get("assessment") or {}).get("systems") or {}).get(sid) or {}
+        spec = next((s for s in getattr(profile, "systems", []) or [] if s["id"] == sid), None) or {}
+        fspec = next((f for f in spec.get("fields") or [] if f["id"] == name), None) or {}
+        raw = (got.get("record") or {}).get(name)
+        norm = V.normalise(raw, fspec.get("type", "text")) if raw is not None else None
+        if norm is None:
+            return []
+        label = f"{spec.get('name') or sid} · {fspec.get('name') or name.replace('_', ' ')}"
+        return [{"ref": ref, "doc": f"record:{sid}", "doc_name": f"{got.get('name') or spec.get('name') or sid} (system of record)", "type": "record", "version": 0, "field": name, "field_name": label,
+                 "value": raw, "norm": norm, "ftype": fspec.get("type", "text"), "confidence": 1.0, "page": None, "line": None, "snippet": f"{label}: {raw}", "verified": True,
+                 "method": "system of record" + (", demonstration data" if got.get("demonstration") else "")}]
     out = []
     for d in docs_of(case, head):
         f = (d.get("fields") or {}).get(fld)

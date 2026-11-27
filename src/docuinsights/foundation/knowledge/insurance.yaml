@@ -146,6 +146,15 @@ terms:
 
 basis:
   insurance_claim:
+    rules.policy_in_force: [Coverage verification before assessment, Period of cover]
+    rules.loss_inside_recorded_cover: [Period of cover, Coverage verification before assessment]
+    rules.loss_while_premium_paid: [Coverage verification before assessment]
+    rules.within_recorded_sum_insured: [Sum insured]
+    rules.notified_in_time_us: [Notification condition]
+    rules.notified_in_time_in: [Notification condition]
+    consistency.holder_on_record: [Insurable interest, Coverage verification before assessment]
+    consistency.vehicle_on_record: [Insurable interest, Coverage verification before assessment]
+    systems.policy_admin: [Coverage verification before assessment]
     rules.loss_after_cover_start: [Period of cover, Coverage verification before assessment]
     rules.loss_before_cover_end: [Period of cover, Coverage verification before assessment]
     rules.notified_in_time: [Notification condition]

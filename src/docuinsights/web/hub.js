@@ -25,7 +25,8 @@
   const token = () => { try { return KEYED ? ownKey || sessionStorage.getItem("docuinsights.key") || "" : localStorage.getItem("cxnova.shop.admin") || localStorage.getItem("cxnova.shop.token") || ""; } catch (e) { return KEYED ? ownKey : ""; } };
   // Who is at the keyboard, as the audit trail will name them. On its own the workbench asks once and remembers; mounted in a host, the host says who it is.
   const who = () => { try { return KEYED ? localStorage.getItem("docuinsights.user") || "" : ""; } catch (e) { return ""; } };
-  const signed = (headers) => { const t = token(); if (t) headers.Authorization = "Bearer " + t; if (who()) headers["X-DocuInsights-User"] = encodeURIComponent(who()); return headers; };
+  const adminKey = () => { try { return sessionStorage.getItem("docuinsights.admin") || ""; } catch (e) { return ""; } };
+  const signed = (headers) => { const t = token(); if (t) headers.Authorization = "Bearer " + t; if (who()) headers["X-DocuInsights-User"] = encodeURIComponent(who()); if (adminKey()) headers["X-DocuInsights-Admin"] = adminKey(); return headers; };
   async function api(path, body, method) {
     const headers = signed({});
     if (body !== undefined) headers["Content-Type"] = "application/json";
@@ -46,8 +47,14 @@
     setTimeout(() => URL.revokeObjectURL(url), 60000);
   });
   const download = (path, name) => run(async () => { const url = URL.createObjectURL(await raw(path)); const a = h("a", { href: url, download: name }); document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000); });
-  function toast(msg) { const t = h("div", { class: "toast", role: "status" }, msg); document.body.appendChild(t); setTimeout(() => t.remove(), 4200); }
-  const run = (fn) => async (e) => { if (e && e.preventDefault) e.preventDefault(); try { await fn(e); } catch (err) { if (err.status === 401) return signIn(err.message); toast(err.message); } };
+  function toast(msg) { document.querySelectorAll(".toast").forEach((x) => x.remove()); const t = h("div", { class: "toast", role: "status" }, msg); document.body.appendChild(t); setTimeout(() => t.remove(), 4200); }
+  const run = (fn) => async (e) => { if (e && e.preventDefault) e.preventDefault(); try { await fn(e); } catch (err) { if (err.status === 401) return signIn(err.message); if (err.status === 403 && /administrator key/.test(err.message)) return askAdmin(); toast(err.message); } };
+  const verText = (v) => { const m = /^(?:(.+)\+)?w(\d+)$/.exec(String(v || "")); return !m ? "v" + v : m[1] ? "v" + m[1] + ", changed here (rules v" + m[2] + ")" : "added here (rules v" + m[2] + ")"; };   // 1.0, 1.0+w3, w2
+  const govNote = () => h("div", { class: "small muted" }, S.cfg && S.cfg.admin === "key" ? "A change here needs the administrator key." : "Anyone who can open this workbench can make a change here. Set an administrator key to keep changes for whoever governs the workspace.");
+  async function askAdmin() {   // a change to how the workspace is governed, on an installation that keeps those for an administrator
+    const v = await form("This change needs the administrator key", [{ k: "key", label: "Administrator key (kept for this browser tab only)", type: "password", min: 1 }], "Use this key"); if (!v) return;
+    try { sessionStorage.setItem("docuinsights.admin", v.key); } catch (e) { /* no storage: the key is asked for again */ }
+    toast("Key noted. Make the change again."); }
   const pill = (status, label) => h("span", { class: "pill " + (status || "") }, label || status);
   const when = (ts) => ts ? new Date(ts).toLocaleString(undefined, { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
   const prof = () => S.cfg.profiles.find((p) => p.id === (S.c ? S.c.profile : (S.sel.profile || S.cfg.profiles[0].id)));
@@ -116,7 +123,7 @@
   function openSource(s) { if (!s.doc || s.doc === "case") return; S.view = "documents"; S.sel.doc = s.doc; S.sel.line = s.page ? { page: s.page, line: s.line } : null; render(); }
 
   // ---------------------------------------------------------------------------------------------- shell
-  const TOP = [["home", "Home"], ["cases", "Cases"], ["insights", "Insights"], ["observability", "Observability"], ["knowledge", "Knowledge"], ["agents", "Agents"], ["platform", "How it is governed"]];
+  const TOP = [["home", "Home"], ["cases", "Cases"], ["insights", "Insights"], ["observability", "Observability"], ["rules", "Rules"], ["connectors", "Connectors"], ["knowledge", "Knowledge"], ["agents", "Agents"], ["platform", "Governance"]];
   const mapQuery = () => "open=" + S.k.open.join(",") + S.k.drill.map((d) => "&drill=" + encodeURIComponent(d)).join("");
   const top = (view) => run(async () => {   // a screen of the workspace (no case open): load what it shows, then draw it
     clearTimeout(S.timer); clearInterval(S.orch.timer); S.orch.playing = false; S.c = null; S.sel = {}; kHash(null); if (view !== "knowledge") S.k.back = null;
@@ -125,6 +132,8 @@
     if (view === "platform") { S.pf = await api("platform"); S.sp = await api("spend"); }
     if (view === "insights") S.ins = await api("insights");
     if (view === "observability") { S.ob = await api("observability"); S.sp = await api("spend"); }
+    if (view === "rules") { S.cases = await api("cases"); await loadRules((S.rv && S.rv.pid) || (S.cfg.profiles.find((p) => p.id === "insurance_claim") || S.cfg.profiles[0]).id); }
+    if (view === "connectors") S.cn = await api("connectors");
     S.view = view; render(); window.scrollTo(0, 0);
   });
   function render() {
@@ -133,13 +142,13 @@
       h("button", { class: "brand", onclick: top("home") }, h("img", { src: BASE + "/static/mark.svg", alt: "" }), h("b", null, S.cfg.product)),
       h("nav", { class: "tabs", "aria-label": "Workspace" }, TOP.map(([id, label]) => h("button", { "aria-current": String(!S.c && (S.view === id || (id === "cases" && S.view === "new"))), onclick: top(id) }, label))),
       h("span", { class: "right" }), h("span", { class: "tag ai" + (S.cfg.model.offline ? " off" : ""), title: S.cfg.model.offline ? "No model is connected: documents are read by patterns, and rules and the recommendation are code." : "A model is connected: it reads documents and writes narrative for the agents. Rules and the recommendation are code." }, h("i"), S.cfg.model.offline ? "AI offline" : "AI live"),
-      h("span", { class: "tag" }, "Repository: " + S.cfg.repository.kind), S.cfg.links.portal ? h("a", { class: "tag", href: S.cfg.links.portal, style: "text-decoration:none" }, "CX Nova portal") : null,
+      S.cfg.links.portal ? h("a", { class: "tag", href: S.cfg.links.portal, style: "text-decoration:none" }, "CX Nova portal") : null,
       KEYED ? h("button", { class: "tag", style: "border:0;cursor:pointer", title: "The name the audit trail records for what you do here. It is a label, not a sign-in: the API key is the sign-in.", onclick: run(async () => {
         const v = await form("Your name, as the audit trail will record it", [{ k: "name", label: "Name", value: who() }], "Save"); if (!v) return;
         try { if (v.name.trim()) localStorage.setItem("docuinsights.user", v.name.trim().slice(0, 60)); else localStorage.removeItem("docuinsights.user"); } catch (e) { /* private window */ }
         S.cfg = await api("config"); render(); }) }, S.cfg.actor && S.cfg.actor !== "caseworker" ? S.cfg.actor : "Set your name") : null,
       h("span", { class: "tag demo" }, "Demonstration, synthetic data"));
-    const views = { home, cases, new: newCase, insights, observability, agents, knowledge, platform, summary, documents, graph, evidence, consistency, assurance, reference, policy, provenance, whatif, monitor, decision, audit, spend: spendView };
+    const views = { home, cases, new: newCase, insights, observability, rules: rulesView, connectors: connectorsView, agents, knowledge, platform, summary, documents, graph, evidence, consistency, assurance, reference, policy, provenance, whatif, monitor, decision, audit, spend: spendView };
     const main = h("main", { class: "main" + (S.view === "knowledge" && !S.c && S.k.view !== "manage" ? " full" : "") });
     if (S.c && !a && !["monitor", "documents", "spend"].includes(S.view)) S.view = "monitor";
     add(main, (views[S.view] || home)());
@@ -837,7 +846,7 @@
     return h("div", { class: "card", id: "f-" + f.id }, h("div", { class: "row" }, pill(f.status), h("b", null, f.title), f.blocked ? pill("fail", "blocked: unsupported") : null, h("span", { class: "right small muted mono" }, f.id)),
       h("p", { style: "margin:6px 0 8px" }, f.message), steps(f.reasoning),
       f.sources.length ? h("div", { class: "grid g2", style: "margin-top:10px" }, f.sources.map((s) => h("div", { class: "src", title: "Open the source", onclick: () => openSource(s) }, h("b", null, s.doc_name), " · ", s.field_name, s.page ? " · page " + s.page + (s.line ? ", line " + s.line : "") : "", h("q", null, s.snippet || String(s.value))))) : null,
-      h("div", { class: "chips small muted", style: "margin-top:10px" }, f.rule ? h("span", { class: "chip", title: f.rule.note || "" }, "Rule " + f.rule.id + " v" + f.rule.version) : null,
+      h("div", { class: "chips small muted", style: "margin-top:10px" }, f.rule ? h("span", { class: "chip", title: f.rule.note || "" }, "Rule " + f.rule.id + " " + verText(f.rule.version)) : null,
         f.reference ? h("a", { class: "chip", href: f.reference.url, target: "_blank", rel: "noopener" }, "Reference as of " + (f.reference.as_of || "n/a") + " (" + f.reference.mode + ")") : null,
         h("span", { class: "chip" }, "Agent: " + f.agent), h("span", { class: "chip" }, "Sources verified " + (v.verified || 0) + "/" + (v.sources || 0)), f.requires_human ? h("span", { class: "chip" }, "Needs a person") : null,
         f.human ? pill(f.human.decision === "accept" ? "pass" : "review", f.human.decision + "ed by " + f.human.by) : null,
@@ -989,6 +998,116 @@
           h("li", null, "A limit, a person's stop and a pause are checked before a call is sent. A call already sent finishes and is counted."), h("li", null, "The same figures are served to other systems at /api/v1/observability, and each case's at /api/v1/cases/{reference}/spend.")))))];
   }
 
+
+  // ---------------------------------------------------------------------------------------------- rules: a business's own, changed without code
+  function ask(title, body, ok) {   // a dialog that shows something and asks yes or no
+    return new Promise((resolve) => { let box; const close = (v) => { box.remove(); resolve(v); };
+      box = h("div", { class: "modal", onclick: (e) => { if (e.target === box) close(false); } }, h("div", { role: "dialog", "aria-label": title, style: "max-width:720px" }, h("div", { class: "stack" }, h("h3", { style: "font-size:16px" }, title), body,
+        h("div", { class: "row", style: "justify-content:flex-end" }, h("button", { class: "btn", type: "button", onclick: () => close(false) }, ok ? "Cancel" : "Close"), ok ? h("button", { class: "btn primary", type: "button", onclick: () => close(true) }, ok) : null))));
+      document.body.appendChild(box); });
+  }
+  async function loadRules(pid) { S.rv = { pid, d: await api("rules/" + pid) }; }
+  const RKINDS = [["date_order", "One date is not after another"], ["date_interval", "A date is within a number of days of another"], ["amount_limit", "An amount is within a limit read from another field"], ["amounts_match", "Two amounts agree within a tolerance"],
+    ["value_limit", "An amount is within fixed bounds"], ["value_in", "A value is one of a list"], ["value_not_in", "A value is none of a list"], ["required_field", "A value is stated"]];
+  async function ruleForm(d, kind, r, heading) {   // the form for one kind of rule; gives back the rule as the service takes it, or null
+    const of = (types) => d.fields.filter((f) => !types || types.includes(f.type)).map((f) => [f.ref, f.name]), dates = of(["date"]), amounts = of(["money", "number"]), any = of(), w = r.applies_when || {};
+    const mid = kind === "date_order" ? [{ k: "first", label: "This date", options: dates, value: r.first }, { k: "then", label: "is not after this date", options: dates, value: r.then }]
+      : kind === "date_interval" ? [{ k: "from", label: "From this date", options: dates, value: r.from }, { k: "to", label: "to this date", options: dates, value: r.to }, { k: "max_days", label: "is at most this many days", value: String(r.max_days ?? "") }]
+      : kind === "amount_limit" ? [{ k: "amount", label: "This amount", options: amounts, value: r.amount }, { k: "limit", label: "is not more than this one", options: amounts, value: r.limit }, { k: "tolerance_pct", label: "give or take this many percent", value: String(r.tolerance_pct ?? "0") }]
+      : kind === "amounts_match" ? [{ k: "a1", label: "This amount", options: amounts, value: (r.amounts || [])[0] }, { k: "a2", label: "agrees with this one", options: amounts, value: (r.amounts || [])[1] }, { k: "tolerance_pct", label: "within this many percent", value: String(r.tolerance_pct ?? "0") }]
+      : kind === "value_limit" ? [{ k: "field", label: "This amount", options: amounts, value: r.field }, { k: "max", label: "is at most (leave empty for no upper bound)", value: String(r.max ?? "") }, { k: "min", label: "and at least (leave empty for no lower bound)", value: String(r.min ?? "") }, { k: "currency", label: "in this currency (code, optional)", value: r.currency || "" }]
+      : kind === "required_field" ? [{ k: "field", label: "This value must be stated", options: any, value: r.field }]
+      : [{ k: "field", label: "This value", options: any, value: r.field }, { k: "values", label: (kind === "value_not_in" ? "is none of" : "is one of") + " these (separate with ;)", value: (r.values || []).join("; ") }];
+    const v = await form(heading, [{ k: "title", label: "The rule in one sentence, as a caseworker reads it", value: r.title || "", min: 3 }, ...mid,
+      { k: "when_ref", label: "Applies only when this field", options: [["", "(always applies)"]].concat(any), value: w.ref || "" }, { k: "when_is", label: "has one of these values (separate with ;). For everywhere but, begin with not:", value: w.not_in ? "not: " + w.not_in.join("; ") : (w.in || [w.is || ""]).join("; ") },
+      { k: "note", label: "Where it comes from: policy wording, clause, regulation", value: r.note || "" }, { k: "why", label: "Why this change (kept in the audit trail)", type: "textarea" }], "Continue");
+    if (!v) return null;
+    const out = { id: r.id, type: kind, title: v.title, note: v.note };
+    ["first", "then", "from", "to", "max_days", "amount", "limit", "tolerance_pct", "field", "max", "min", "currency"].forEach((k) => { if (v[k] !== undefined && String(v[k]).trim() !== "") out[k] = v[k]; });
+    if (kind === "amounts_match") out.amounts = [v.a1, v.a2];
+    if (v.values !== undefined) out.values = v.values.split(";").map((x) => x.trim()).filter(Boolean);
+    const but = /^\s*not:/i.test(v.when_is || ""), whens = (v.when_is || "").replace(/^\s*not:/i, "").split(";").map((x) => x.trim()).filter(Boolean);
+    if (v.when_ref && whens.length) out.applies_when = but ? { ref: v.when_ref, not_in: whens } : whens.length > 1 ? { ref: v.when_ref, in: whens } : { ref: v.when_ref, is: whens[0] };
+    return { rule: out, why: v.why || "" };
+  }
+  function resultOf(t) { return h("div", { class: "stack" }, h("div", null, pill(t.status === "pass" ? "pass" : t.status === "fail" ? "fail" : "review", t.status), h("b", { style: "margin-left:8px" }, t.message)), h("p", { class: "small muted" }, "The rule: " + t.says),
+    h("ol", { class: "small", style: "margin:0;padding-left:18px;display:grid;gap:4px" }, (t.reasoning || []).map((x) => h("li", null, x))), h("p", { class: "small muted" }, "Tested against " + t.case + " as it was last assessed. Nothing was saved or changed by this test.")); }
+  function rulesView() {
+    const rv = S.rv, d = rv && rv.d; if (!d) return [section("Rules", "The rules every case is checked against."), h("p", { class: "muted" }, "Loading…")];
+    const pid = rv.pid, post = async (body) => { rv.d = await api("rules/" + pid, body); render(); }, assessed = (S.cases || []).filter((c) => c.profile === pid && c.outcome).map((c) => [c.reference, c.reference + " · " + (c.label || c.outcome)]);
+    const origin = (o) => h("span", { class: "pill " + (o === "shipped" ? "" : "review") }, o);
+    const sw = (group, row) => h("button", { class: "btn sm" + (row.enabled ? "" : " primary"), title: row.enabled ? "Switch it off for this workspace" : "Switch it back on", onclick: run(async () => { if (row.enabled) { const v = await askWhy("Switch off: " + row.title, "Switch it off"); if (!v) return; if ((v.note || "").trim().length < 5) return toast("Say why this is switched off: the reason is kept with the change"); await post({ do: "off", group, id: row.id, note: v.note }); toast("Switched off. It applies to the next assessment."); }
+      else { await post({ do: "on", group, id: row.id }); toast("Switched on"); } }) }, row.enabled ? "Switch off" : "Switch on");
+    const tryIt = async (rule) => { if (!assessed.length) { toast("Assess a " + d.name + " case first: a rule is tested against what was read from its documents"); return null; }
+      const v = await form("Test against which case?", [{ k: "case", label: "A case that has been assessed", options: assessed }], "Run the test"); if (!v) return null; return api("rules/" + pid + "/test", { rule, case: v.case }); };
+    const edit = (row) => run(async () => { const kind = row.rule.type === "value_in" && row.rule.negate ? "value_not_in" : row.rule.type, got = await ruleForm(d, kind, row.rule, "Change: " + row.title); if (!got) return;
+      await post({ do: "set", rule: got.rule, note: got.why }); toast("Saved as version " + rv.d.version + ". It applies to the next assessment."); });
+    const add = run(async () => { const first = await form("Add a rule to " + d.name, [{ k: "id", label: "A short id of your own (lower-case letters, digits, underscores)", placeholder: "claims_over_limit", min: 2 }, { k: "kind", label: "What kind of rule", options: RKINDS }], "Continue"); if (!first) return;
+      const got = await ruleForm(d, first.kind, { id: first.id.trim().toLowerCase() }, "New rule: " + (RKINDS.find((k) => k[0] === first.kind) || [])[1]); if (!got) return;
+      if (assessed.length) { const t = await tryIt(got.rule).catch((e) => { toast(e.message); return undefined; }); if (t === undefined) return; if (t && !(await ask("Before it is saved: what it does on " + t.case, resultOf(t), "Save the rule"))) return; }
+      await post({ do: "set", rule: got.rule, note: got.why }); toast("Added as version " + rv.d.version + ". It applies to the next assessment."); });
+    const require = run(async () => { const v = await form("Add a document requirement to " + d.name, [{ k: "id", label: "A short id of your own", placeholder: "incident_always", min: 2 }, { k: "any_of", label: "This kind of document must be in the package", options: d.document_types.map((t) => [t.id, t.name]) }, { k: "title", label: "As a caseworker reads it (optional)" }, { k: "note", label: "Why (kept in the audit trail)", type: "textarea" }], "Add the requirement");
+      if (v) { await post({ do: "require", evidence: { id: v.id.trim().toLowerCase(), any_of: [v.any_of], title: v.title }, note: v.note }); toast("Added. It applies to the next assessment."); } });
+    const sheetIn = h("input", { type: "file", accept: ".xlsx,.csv,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", style: "display:none", onchange: run(async (e) => { const file = e.target.files[0]; e.target.value = ""; if (!file) return;
+      if (file.size > 5 * 1024 * 1024) return toast("A rules sheet is at most 5 MB");
+      const bytes = new Uint8Array(await file.arrayBuffer()); let bin = ""; for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      const sheet = { content_base64: btoa(bin) }, pre = await api("rules/" + pid + "/import", sheet);
+      const rows = pre.rows.filter((r) => r.does !== "nothing"), body = h("div", { class: "stack" }, h("p", { class: "small muted" }, pre.rows.length + " row(s) read: " + pre.changes + " change(s) to make, " + pre.refused + " row(s) refused. A refused row is left out; the others are still made."),
+        rows.length ? h("table", null, h("thead", null, h("tr", null, ["Row", "Rule", "What happens", "Why not"].map((x) => h("th", null, x)))), h("tbody", null, rows.map((r) => h("tr", null, h("td", { class: "mono small" }, r.row), h("td", null, h("b", null, r.id), h("div", { class: "small muted" }, r.title)), h("td", null, pill(r.does === "refused" ? "fail" : "pass", r.does)), h("td", { class: "small" }, r.problem || "–")))))
+          : h("p", null, "The sheet says what the workspace already has: there is nothing to change."));
+      if (await ask("Rules sheet: " + file.name, body, pre.changes ? "Make " + pre.changes + " change(s)" : null)) { const done = await api("rules/" + pid + "/import", { ...sheet, apply: true }); if (done.rules) rv.d = done.rules; render(); toast("The sheet was applied: the workbook is at version " + rv.d.version); } }) });
+    const tbl = (head, rows) => h("table", null, h("thead", null, h("tr", null, head.map((x) => h("th", null, x)))), h("tbody", null, rows));
+    return [section("Rules", "The rules every case is checked against, in plain words. Change a limit, switch a rule off, add one of your own or import a filled-in sheet: no code, no restart. Every change is a new version in the audit trail, and a case keeps the rule that was in force when it was assessed."),
+      h("div", { class: "stack" },
+        h("div", { class: "row", style: "flex-wrap:wrap;gap:8px" }, S.cfg.profiles.map((p) => h("button", { class: "btn sm" + (p.id === pid ? " primary" : ""), onclick: run(async () => { await loadRules(p.id); render(); }) }, p.name))),
+        h("div", { class: "card", style: "display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center" }, h("div", null, h("b", null, d.name), h("div", { class: "small muted" }, d.version ? "This workspace's rules, version " + d.version : "As shipped: nothing has been changed in this workspace yet. The limits are sample values until you make them yours."), govNote()),
+          h("div", { class: "row", style: "margin-left:auto;flex-wrap:wrap;gap:8px" }, h("button", { class: "btn sm primary", onclick: add }, "Add a rule"), h("button", { class: "btn sm", onclick: require }, "Add a document requirement"),
+            h("button", { class: "btn sm", onclick: download("rules/" + pid + "/template.xlsx", "rules-" + pid + ".xlsx"), title: "The rules in force as a workbook, with how to fill it in and the names a rule can use. Fill it in and import it back." }, "Download the rules sheet"),
+            h("button", { class: "btn sm", onclick: () => sheetIn.click(), title: "The workbook, or the same sheet saved as CSV. You see what each row would do before anything changes." }, "Import a filled-in sheet"), sheetIn,
+            h("button", { class: "btn sm ghost", onclick: download("rules/" + pid + "/template.csv", "rules-" + pid + ".csv"), title: "The same sheet as plain text, for another system" }, "as CSV"))),
+        cardOf("Rules (" + d.rules.filter((r) => r.enabled).length + " in force)", tbl(["Rule", "From", "Version", "", ""], d.rules.map((r) => h("tr", { style: r.enabled ? null : "opacity:.55" }, h("td", null, h("b", null, r.title), h("div", { class: "small" }, r.says), r.note ? h("div", { class: "small muted" }, r.note) : null,
+            r.problem ? h("div", { class: "small", style: "margin-top:4px;color:var(--bad)" }, "Cannot run as it stands: " + r.problem + ". Every case says so and goes to a person until it is changed or removed.") : null),
+          h("td", null, origin(r.origin), r.problem ? h("div", null, pill("fail", "cannot run")) : null, r.enabled ? null : h("div", { class: "small muted" }, "switched off")), h("td", { class: "mono small" }, r.version),
+          h("td", null, h("div", { class: "row", style: "gap:6px;flex-wrap:wrap" }, r.kind === "codes_consistent" ? h("span", { class: "small muted" }, "reads a reference: changed in the profile") : [h("button", { class: "btn sm", onclick: edit(r) }, "Change"),
+            h("button", { class: "btn sm", onclick: run(async () => { const t = await tryIt(r.rule); if (t) await ask("What this rule does on " + t.case, resultOf(t)); }) }, "Test"),
+            r.origin !== "shipped" ? h("button", { class: "btn sm", onclick: run(async () => { const v = await askWhy(r.origin === "added here" ? "Remove: " + r.title : "Take it back to how it shipped: " + r.title, r.origin === "added here" ? "Remove" : "Take it back"); if (v) { await post({ do: "reset", id: r.id, note: v.note }); toast("Done"); } }) }, r.origin === "added here" ? "Remove" : "Take it back") : null])),
+          h("td", null, sw("rules", r)))))),
+        h("div", { class: "grid g2" },
+          cardOf("Documents that must be in the package", tbl(["Requirement", "From", ""], d.evidence.map((e) => h("tr", { style: e.enabled ? null : "opacity:.55" }, h("td", null, h("b", null, e.title), h("div", { class: "small" }, e.says), e.note ? h("div", { class: "small muted" }, e.note) : null), h("td", null, origin(e.origin)),
+            h("td", null, h("div", { class: "row", style: "gap:6px" }, sw("evidence", e), e.origin === "added here" ? h("button", { class: "btn sm", onclick: run(async () => { await post({ do: "reset", id: e.id }); toast("Removed"); }) }, "Remove") : null)))))),
+          cardOf("What must agree across the documents", tbl(["Check", ""], d.consistency.map((c) => h("tr", { style: c.enabled ? null : "opacity:.55" }, h("td", null, h("b", null, c.title), h("div", { class: "small" }, c.says)), h("td", null, sw("consistency", c))))))),
+        cardOf("Every change", d.history.length ? tbl(["Version", "When", "Who", "What", "Why"], d.history.map((x) => h("tr", null, h("td", { class: "mono small" }, x.version), h("td", { class: "small muted" }, when(x.at)), h("td", { class: "small" }, x.by), h("td", { class: "small" }, h("b", null, x.id), " " + x.what), h("td", { class: "small" }, x.note || "–"))))
+          : h("p", { class: "muted" }, "No change has been made in this workspace. Each one will be listed here and in the provenance ledger.")),
+        h("details", { class: "card" }, h("summary", null, "The " + d.fields.length + " values a rule can name"), h("p", { class: "small muted", style: "margin:8px 0" }, "From the case record, from each kind of document, and from each system of record this use case checks against. These are the names to use in the rules sheet."),
+          tbl(["Name in the sheet", "What it is", "Kind"], d.fields.map((f) => h("tr", null, h("td", { class: "mono small" }, f.ref), h("td", { class: "small" }, f.name), h("td", { class: "small muted" }, f.type))))))];
+  }
+  function connectorsView() {   // where a case comes in, what it is checked against, where the answer goes
+    const c = S.cn; if (!c) return [section("Connectors", "How DocuInsights meets the systems around it."), h("p", { class: "muted" }, "Loading…")];
+    const row = (k, v) => h("tr", null, h("td", { class: "small muted", style: "width:38%" }, k), h("td", { class: "small" }, v)), kind = (s) => (s.kind === "http" ? pill("pass", "your system, over REST") : s.kind === "adapter" ? pill("pass", "your system, through an adapter") : s.kind === "synthetic" ? pill("review", "demonstration records") : pill("fail", "not connected"));
+    const test = (s) => run(async () => { const v = await form("Ask " + s.name + " for a record", [{ k: "key", label: s.key + " to look up", placeholder: s.kind === "synthetic" ? "PA-IN-2201987" : "", min: 1 }], "Ask now"); if (!v) return;
+      const a = await api("connectors/test", { profile: s.profile, system: s.id, key: v.key }); S.cn = await api("connectors"); render();
+      await ask(s.name + " answered: " + a.status.replace("_", " ") + " (" + a.ms + " ms)", h("div", { class: "stack" }, a.reason ? h("p", null, a.reason) : null, Object.keys(a.record || {}).length ? h("table", null, h("tbody", null, Object.entries(a.record).map(([k, x]) => row((s.fields.find((f) => f.id === k) || {}).name || k, String(x))))) : null,
+        a.demonstration ? h("p", { class: "small muted" }, "This is demonstration data, not a system of record.") : null)); });
+    return [section("Connectors", "A case meets the systems around it in three places: where it comes in, what it is checked against, and where the answer goes. Each is a setting, not a rebuild."),
+      h("div", { class: "stack" },
+        h("div", { class: "grid g3" },
+          cardOf("1 · Where cases come in", h("table", null, h("tbody", null, row("API", h("span", { class: "mono" }, "POST " + c.intake.api)), row("Signed in with a key", c.intake.authenticated ? pill("pass", "yes") : pill("review", "no key set")), row("Document repository", c.intake.repository.name || c.intake.repository.kind),
+            row("Files read", (c.intake.accepts || []).join(" ") || "pdf, images, office files, email"))), h("ul", { class: "small muted", style: "margin:8px 0 0;padding-left:18px" }, c.intake.ways.map((w) => h("li", null, w)))),
+          cardOf("2 · What they are checked against", h("p", { class: "small" }, c.systems.length + " system(s) of record. A rule can use a record's fields exactly as it uses a document's."), h("table", { style: "margin-top:6px" }, h("tbody", null, row("Lookups so far", c.lookups.total), Object.entries(c.lookups.by_status).map(([k, v]) => row(k.replace("_", " "), v)))),
+            h("p", { class: "small muted", style: "margin-top:8px" }, "A system that does not answer is reported as unavailable and the case goes to a person. It is never read as a record that does not exist.")),
+          cardOf("3 · Where the answer goes", h("table", null, h("tbody", null, row("Filed to", c.write_back.repository.name || c.write_back.repository.kind), row("Notification", c.write_back.webhook.on ? [pill("pass", "on"), " " + c.write_back.webhook.target + (c.write_back.webhook.signed ? ", signed" : "")] : "off: set DOCUINSIGHTS_WEBHOOK_URL"),
+            row("Events", c.write_back.webhook.events.join(", ")))), h("ul", { class: "small muted mono", style: "margin:8px 0 0;padding-left:18px" }, c.write_back.api.map((w) => h("li", null, w))))),
+        c.systems.map((s) => cardOf(s.name + " · " + s.use_case, h("div", { class: "row", style: "gap:10px;flex-wrap:wrap;margin-bottom:8px" }, kind(s), h("span", { class: "small" }, s.kind === "synthetic" ? s.records + " invented records: " + Object.entries(s.by_region || {}).map(([k, n]) => k + " (" + n + ")").join(", ") + ". Nothing here is a real policy." : s.kind === "http" ? "Asked at " + s.target + (s.authenticated ? ", with credentials" : ", without credentials") : s.kind === "adapter" ? "Asked through " + s.target : "No connector is configured: every case says so and goes to a person."),
+            h("button", { class: "btn sm", style: "margin-left:auto", onclick: test(s) }, "Test a lookup")),
+          h("div", { class: "grid g2" },
+            h("div", null, h("p", { class: "small muted" }, "Looked up by: " + s.key + ". A record carries:"), h("div", { class: "small", style: "margin-top:4px" }, s.fields.map((f) => f.name).join(" · "))),
+            h("div", null, h("p", { class: "small muted" }, s.kind === "synthetic" ? "To put your own system in its place, set on the server (the rules and the screens stay as they are):" : "Set on the server:"),
+              h("table", { style: "margin-top:4px" }, h("tbody", null, s.settings.map((x) => h("tr", null, h("td", { class: "mono small", style: "white-space:nowrap;padding-right:10px" }, x.name.replace("DOCUINSIGHTS_SYSTEM_", "…_")), h("td", { class: "small muted" }, x.what))))),
+              h("p", { class: "small muted", style: "margin-top:6px" }, "Each name starts with DOCUINSIGHTS_SYSTEM_. An adapter is one function: " + c.adapter.contract + ". A reference to copy ships as " + c.adapter.reference + "."))),
+          s.note ? h("p", { class: "small muted", style: "margin-top:8px" }, s.note) : null)),
+        c.lookups.latest.length ? cardOf("Latest lookups", h("table", null, h("thead", null, h("tr", null, ["When", "Case", "What happened"].map((x) => h("th", null, x)))), h("tbody", null, c.lookups.latest.map((l) => h("tr", null, h("td", { class: "small muted" }, when(l.at)), h("td", { class: "mono small" }, l.case || "test"), h("td", { class: "small" }, l.summary)))))) : null)];
+  }
+
   function spendCard(sp) {   // the workspace's spend on the Insights screen
     if (!sp) return null;
     const t = { ...sp.totals, currency: sp.settings.currency }, top = Math.max(1, ...sp.by_profile.map((r) => r.tokens)), name = (id) => (S.cfg.profiles.find((p) => p.id === id) || {}).name || id;
@@ -1003,14 +1122,14 @@
           h("td", { class: "mono small", style: "text-align:right" }, nCalls(r.calls)), h("td", { class: "mono small", style: "text-align:right" }, tok(r.tokens)), h("td", { class: "mono small", style: "text-align:right" }, money({ ...r, currency: sp.settings.currency }) || "–")))))
         : h("p", { class: "muted" }, "Nothing has been spent.")));
   }
-  function spendSettingsCard() {   // prices, limits and the pause, on How it is governed
+  function spendSettingsCard() {   // prices, limits and the pause, on Governance
     const sp = S.sp; if (!sp) return null;
     const st = sp.settings, row = (k, v) => h("tr", null, h("td", { class: "small muted", style: "width:42%" }, k), h("td", null, v)), own = (k) => (st.changed.includes(k) ? h("span", { class: "small muted" }, " · set here") : null);
     const edit = run(async () => { const v = await form("Prices and limits for this workspace", [{ k: "price_input", label: "Price for a million tokens in (your contracted rate)", value: String(st.price_input || "") }, { k: "price_output", label: "Price for a million tokens out", value: String(st.price_output || "") }, { k: "currency", label: "Currency code", value: st.currency },
       { k: "case_token_limit", label: "Tokens one case may use (0: no limit)", value: String(st.case_token_limit || "") }, { k: "case_cost_limit", label: "Money one case may cost (0: no limit)", value: String(st.case_cost_limit || "") }, { k: "doc_token_limit", label: "Tokens one document may use (0: no limit)", value: String(st.doc_token_limit || "") }], "Save");
       if (v) { S.sp = await api("spend", Object.fromEntries(Object.entries(v).map(([k, x]) => [k, String(x).trim() === "" ? (k === "currency" ? "" : null) : k === "currency" ? x : Number(x)]))); if (S.view === "observability") S.ob = await api("observability"); render(); toast("Saved. It applies to the next model call."); } });
     const pause = (on) => run(async () => { const v = on ? await askWhy("Pause model use for the whole workspace. Every agent runs on patterns and rules until it is resumed.", "Pause model use") : {}; if (v) { S.sp = await api("spend", { paused: on, note: v.note || "" }); if (S.view === "observability") S.ob = await api("observability"); render(); toast(on ? "Model use is paused" : "Model use is back on"); } });
-    return cardOf("Spend and limits", h("p", { class: "small muted", style: "margin-bottom:8px" }, "Every model call is counted against its case. A limit holds a call back before it is sent; the agent then falls back to the use case's patterns and its run says why."),
+    return cardOf("Spend and limits", h("p", { class: "small muted", style: "margin-bottom:8px" }, "Every model call is counted against its case. A limit holds a call back before it is sent; the agent then falls back to the use case's patterns and its run says why.", S.cfg.admin === "key" ? " Anyone may pause model use; changing a price or a limit, or resuming, needs the administrator key." : ""),
       h("table", null, h("tbody", null, row("Price", st.priced ? [st.currency + " " + st.price_input + " in / " + st.price_output + " out, for a million tokens", own("price_input")]
           : st.estimates ? "None stated: costed at the connected model's published list price (as of " + st.list_prices_as_of + ") and marked est. State your contracted rate to replace it." : "Not set: spend is shown in tokens only"),
         row("One case may use", [st.case_token_limit ? tok(st.case_token_limit) + " tokens" : "no token limit", st.case_cost_limit ? " · " + st.currency + " " + st.case_cost_limit : "", own("case_token_limit")]), row("One document may use", [st.doc_token_limit ? tok(st.doc_token_limit) + " tokens" : "no limit", own("doc_token_limit")]),

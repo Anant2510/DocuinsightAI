@@ -19,7 +19,7 @@ kinds of document, the evidence it asks for, its rules. Five ship, each with inv
 | Use case | Who runs it | What it checks |
 | --- | --- | --- |
 | `supplier_invoice` | Finance operations | an invoice against its purchase order and proof of receipt, and whether it was seen before |
-| `insurance_claim` | Insurance | a claim against its policy: cover dates, notification, the amount, the names |
+| `insurance_claim` | Insurance | a claim against its policy and the policy record: in force, premium paid, cover dates, notification by region, the amount, the names |
 | `loan_application` | Banking and lending | what an applicant declared against the payslip, the statement and the employer's letter |
 | `customs_claim` | Customs and trade | evidence, consistency, and a commodity code read from the tariff for the case's date |
 | `trade_finance` | Trade finance | documents presented under a documentary credit against the credit's terms |
@@ -55,10 +55,14 @@ python -m docuinsights serve --port 8090
 ```
 
 Open the workbench and pick a use case on the home page: **Try it** on a sample runs it end to end. The top of the page
-has six screens: Home, Cases (the work queue: priority, queue, due date, who has it), Insights (how many cases go
+has nine screens: Home, Cases (the work queue: priority, queue, due date, who has it), Insights (how many cases go
 straight through, how many need a person and why, how long a decision takes; counted from the case files), Knowledge
 (everything known, explored as in KB Forge: four levels, industry, domain, solution, customer), Agents (their
-contracts) and How it is governed (contracts, memory, provenance, throttling, watchlists as they stand).
+contracts) and Governance (contracts, memory, provenance, throttling, watchlists as they stand). Three more are where
+an installation makes the product its own: **Observability** (what the agents did and what it cost), **Rules** (read,
+change, add, switch off and test the rules of a use case, or download the rules sheet, fill it in and import it; every
+change is a version in the audit trail) and **Connectors** (where cases come in, the systems of record they are
+checked against, and where the answer goes).
 Inside a case: summary, documents, evidence, consistency, **screening, integrity and privacy**, rules, the graph,
 provenance, the what-if simulator, the decision with its printable record, and **Agent orchestration**: one board
 that shows the boss agent's plan, each agent run under its contract, and what every step took from the knowledge
@@ -116,6 +120,15 @@ lists in `DOCUINSIGHTS_WATCHLISTS` (JSON or CSV files, or folders of them) and t
 **Telling another system.** Set `DOCUINSIGHTS_WEBHOOK_URL` and a small signed message is sent when a case is assessed
 or decided (`DOCUINSIGHTS_WEBHOOK_SECRET` signs it). Personal data in it is masked.
 
+**Your rules.** The limits that ship are sample values. On the **Rules** screen, change them, add your own, or
+download the rules sheet for your claims or operations team to fill in and import it back. Set
+`DOCUINSIGHTS_ADMIN_KEY` to keep those changes for whoever governs the workspace.
+
+**Your systems of record.** The insurance use case checks each claim against a policy administration system. A
+synthetic one (invented policies, United States and India) answers until you name your own with
+`DOCUINSIGHTS_SYSTEM_POLICY_ADMIN_URL` and its neighbours, or an adapter. The **Connectors** screen shows what is
+connected and tests a lookup.
+
 ## On a server
 
 [DEPLOY.md](DEPLOY.md) puts it on a Windows server as a service behind the machine's web server, reached from
@@ -126,7 +139,9 @@ running installation up to date.
 ## Use it from another system
 
 `POST /api/v1/cases` with `{reference, profile, fields, documents: [{name, category, content_base64}], wait: true}`
-returns the assessment as JSON: outcome, reasons, findings, triage, watchlist matches, personal data by kind.
+returns the assessment as JSON: outcome, reasons, findings, triage, watchlist matches, personal data by kind, the
+version of the rules it was made on and what each system of record answered. `POST /api/v1/cases/{reference}/decision`
+writes back a decision a person made in your own system.
 `GET /api/v1/cases/{reference}/record` is the decision record (`?mask=1` masks personal data), `GET /api/v1/insights`
 the workspace's numbers, `GET /api/export/cases.csv` the work queue. `DOCUINSIGHTS_REPOSITORY=omnidocs` files assessed cases to NewgenONE OmniDocs.
 Both, and what has not been verified against a live system, are described in [DOCUINSIGHTS.md](DOCUINSIGHTS.md).
