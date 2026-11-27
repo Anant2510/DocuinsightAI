@@ -46,6 +46,7 @@ from docuinsights import assurance as A, pipeline as P, reader, reports, values 
 from docuinsights import rulebook as RB, spend as SP, systems as SYS  # noqa: E402
 from docuinsights.ledger import Ledger  # noqa: E402
 from docuinsights.model import BaseModel_, ModelError  # noqa: E402
+from docuinsights.casefile import case_facts  # noqa: E402
 from docuinsights.profiles import Profile, ProfileError, get_profile, load_profiles  # noqa: E402
 from docuinsights.service import Service, ServiceError  # noqa: E402
 from docuinsights.store import StoreError  # noqa: E402
@@ -2220,3 +2221,141 @@ def test_a_workspaces_rules_outlive_an_upgrade_and_a_damaged_file_out_loud(svc, 
         assert svc.cases(T) and svc.knowledge_overview(T)["index"]["entities"] and svc.connectors(T)["systems"]
     path.write_text(json.dumps(book), encoding="utf-8")   # restored from a backup
     assert svc.rules(T, P_INS)["version"] == book["version"] and svc.ledger(T).verify()["ok"]
+
+
+# ============================================================================================================
+# 14. 0.8.1: the facts a case cannot be registered without, and the meter that counts while a case runs
+# ============================================================================================================
+FACTS = {"claim_type": "Overpayment claim", "claimed_amount": "GBP 1,233.60", "relevant_date": "2026-11-03", "received_date": "2026-11-20"}
+BAD_FACTS = [   # one fact wrong at a time, and what the refusal says about it
+    ({"claimed_amount": None}, "Claimed amount is needed (an amount with its currency, for example GBP 1,233.60)"), ({"claimed_amount": "   "}, "Claimed amount is needed"),
+    ({"claimed_amount": "1,233.60"}, "Claimed amount needs its currency"), ({"claimed_amount": "XYZ 100"}, "Claimed amount needs its currency"), ({"claimed_amount": "GBP"}, "Claimed amount is not an amount"),
+    ({"claimed_amount": "about a thousand"}, "Claimed amount is not an amount"), ({"claimed_amount": "GBP 0"}, "Claimed amount must be more than zero"), ({"claimed_amount": "GBP -5.00"}, "Claimed amount must be more than zero"),
+    ({"claimed_amount": "JPY 5000"}, "Claimed amount is in JPY; this use case takes GBP, EUR, USD, INR"), ({"claimed_amount": ["GBP 5"]}, "Claimed amount is one value, not a list"),
+    ({"claimed_amount": {"amount": "x", "currency": "GBP"}}, "Claimed amount is not an amount"), ({"claimed_amount": {"amount": 5}}, "Claimed amount needs its currency"),
+    ({"relevant_date": None}, "Relevant date (tariff as-of) is needed (a date, yyyy-mm-dd)"), ({"relevant_date": "31/02/2026"}, "Relevant date (tariff as-of) is not a date"), ({"relevant_date": "soon"}, "is not a date"),
+    ({"received_date": ""}, "Claim received is needed (a date, yyyy-mm-dd)"), ({"received_date": "2026-13-01"}, "Claim received is not a date"), ({"received_date": {"day": 1}}, "Claim received is one value, not a list"),
+    ({"claim_type": "Refund"}, "Claim type is one of: Overpayment claim"), ({"claim_type": ["Overpayment claim"]}, "Claim type is one value, not a list"),
+]
+
+
+@pytest.mark.parametrize("change,says", BAD_FACTS, ids=[f"{next(iter(c))}={next(iter(c.values()))!r}"[:60] for c, _ in BAD_FACTS])
+def test_a_case_is_not_registered_without_the_facts_its_use_case_needs(svc, change, says):
+    with pytest.raises(ServiceError) as err:
+        svc.create_case(T, "NEED-1", "customs_claim", {**FACTS, **change})
+    assert says in str(err.value) and err.value.status == 400 and str(err.value).startswith("A Customs claim intelligence case cannot be registered yet: "), str(err.value)
+    assert svc.cases(T) == [] and not (svc.store.root / T / "cases" / "NEED-1").exists(), "a refused case leaves nothing behind"
+
+
+def test_the_mandatory_facts_are_the_same_on_every_way_in(live, tmp_path):
+    """What the form marks as needed is declared once, by the use case. The form reads it from there, and so do the API another system calls and
+    the samples: there is no door a case comes through without them."""
+    import yaml
+
+    from docuinsights import profiles
+
+    declared = {f["id"]: f for f in get_profile("customs_claim").case_fields()}
+    assert all(declared[k]["required"] for k in FACTS) and not declared["physical_goods"]["required"] and not declared["classification_in_question"]["required"]
+    assert declared["claim_type"]["options"] == ["Overpayment claim"] and declared["claim_type"]["default"] == "Overpayment claim" and declared["claimed_amount"]["currencies"] == ["GBP", "EUR", "USD", "INR"]
+    call, service = live
+    status, cfg = call("GET", "/api/config")
+    shown = {f["id"]: f for f in next(p for p in cfg["profiles"] if p["id"] == "customs_claim")["case"]["fields"]}
+    assert status == 200 and shown == declared, "the form is drawn from what the use case declares"
+    for p in cfg["profiles"]:   # an amount always comes with the currencies it can be stated in
+        assert all(f["currencies"] for f in p["case"]["fields"] if f["type"] == "money"), p["id"]
+    doc = {"name": "note.txt", "text": "Commercial invoice. Invoice No INV-1."}
+    for path in ("/api/cases", "/api/v1/cases"):
+        status, out = call("POST", path, {"reference": "DOOR-1", "profile": "customs_claim", "documents": [doc]})
+        assert status == 400 and all(x in out["detail"] for x in ("Claimed amount is needed", "Relevant date (tariff as-of) is needed", "Claim received is needed")), (path, status, out)
+        status, out = call("POST", path, {"reference": "DOOR-1", "profile": "customs_claim", "fields": {**FACTS, "claimed_amount": "1,233.60", "claim_type": "Refund"}, "documents": [doc]})
+        assert status == 400 and "Claimed amount needs its currency" in out["detail"] and "Claim type is one of: Overpayment claim" in out["detail"], "everything that is wrong is said at once"
+    assert service.cases(T) == []
+    # given as a person or a system gives them, they are kept in one form
+    for n, (given, kept) in enumerate((({"claimed_amount": "£1,233.60"}, "GBP 1,233.60"), ({"claimed_amount": "1.233,60 EUR"}, "EUR 1,233.60"), ({"claimed_amount": {"amount": 1233.6, "currency": "inr"}}, "INR 1,233.60"),
+                                       ({"claimed_amount": "USD 99"}, "USD 99.00"), ({"claimed_amount": 1233.6}, None))):
+        status, out = call("POST", "/api/cases", {"reference": f"KEPT-{n}", "profile": "customs_claim", "fields": {**FACTS, **given}})
+        assert (status, (out.get("fields") or {}).get("claimed_amount") if status == 201 else None) == ((201, kept) if kept else (400, None)), (given, status, out)
+    status, out = call("POST", "/api/v1/cases", {"reference": "KEPT-9", "profile": "customs_claim", "documents": [doc],
+                                                   "fields": {"claim_type": "OVERPAYMENT claim", "claimed_amount": "GBP 1,233.60", "relevant_date": "03/11/2026", "received_date": "20 Nov 2026"}})
+    assert status == 200 and out["reference"] == "KEPT-9", out
+    kept = service.case(T, "KEPT-9")["fields"]
+    assert kept["claim_type"] == "Overpayment claim" and kept["relevant_date"] == "2026-11-03" and kept["received_date"] == "2026-11-20" and kept["physical_goods"] == "yes"
+    assert service.create_case(T, "KEPT-10", "customs_claim", {k: v for k, v in FACTS.items() if k != "claim_type"})["fields"]["claim_type"] == "Overpayment claim", "the one kind of claim there is, is the default"
+    for sample in get_profile("customs_claim").samples:   # the bundled cases are registered through the same door
+        assert service.load_sample(T, "customs_claim", sample["id"])["fields"]["claim_type"] == "Overpayment claim"
+    # a use case that asks for nothing is as it was: a case with no facts, received today
+    bare = service.create_case(T, "BARE-1", "supplier_invoice", {"received_date": "not a date", "unknown": "x"})
+    assert bare["fields"]["received_date"] == "not a date" and service.create_case(T, "BARE-2", "supplier_invoice")["fields"]["received_date"]
+    # and a use case cannot declare its facts carelessly
+    raw = yaml.safe_load((Path(profiles.HERE) / "profiles" / "customs_claim.yaml").read_text(encoding="utf-8"))
+    rest = [f for f in raw["case"]["fields"] if f["id"] != "claim_type"]
+    fact = lambda **kw: {**raw, "case": {**raw["case"], "fields": [{"id": "claim_type", "name": "Claim type", **kw}, *rest]}}  # noqa: E731
+    for wrong, message in ((fact(type="text", options=["A", "B"], default="C"), "default is not one of its options"), (fact(type="text", options=[]), "options is a list"), (fact(type="text", options="A"), "options is a list"),
+                           (fact(type="text", currencies=["GBP"]), "currencies is a list of currency codes, on an amount"), (fact(type="money", currencies=["POUNDS"]), "currencies is a list of currency codes"),
+                           (fact(type="colour"), "is text, date, money or number"), ({**raw, "case": {**raw["case"], "fields": [*raw["case"]["fields"], {"id": "claim type"}]}}, "needs an id")):
+        with pytest.raises(ProfileError, match=message):
+            Profile(wrong, tmp_path / "p.yaml")
+    more = Profile(fact(type="text", required=True, options=["Overpayment claim", "Rejected goods"]), tmp_path / "more.yaml")   # a second kind of claim is one more word in the list
+    assert more.case_fields()[0]["options"] == ["Overpayment claim", "Rejected goods"] and "default" not in more.case_fields()[0]
+    assert case_facts(more, {**FACTS, "claim_type": "rejected goods"})[0]["claim_type"] == "Rejected goods" and "Claim type is needed (one of: Overpayment claim; Rejected goods)" in case_facts(more, {})[1]
+
+
+def test_the_meter_counts_while_a_case_runs_and_adds_up_to_the_case_files(tmp_path):
+    """The live meter is the same count as every other spend figure, asked for often: nothing today before anything ran; a running case
+    named with what it has spent so far, moving with each call and not only when an agent has finished; and afterwards today's sum and the
+    sum in all equal to the cases' own."""
+    svc, model = billed(tmp_path, delay=0.12, name="claude-sonnet-5-5")
+    idle = svc.live(T)
+    assert idle["today"]["calls"] == 0 and idle["all"]["tokens"] == 0 and idle["running"] == [] and idle["model"]["connected"] is True and idle["paused"] is False and idle["cases"] == 0
+    ref = svc.load_sample(T, "customs_claim", "positive")["reference"]
+    svc.assess_in_background(T, ref)
+    seen, steps = [], set()
+    for _ in range(400):
+        m = svc.live(T)
+        mine = next((r for r in m["running"] if r["reference"] == ref), None)
+        if mine:
+            seen.append(mine["tokens"])
+            steps.add((mine["steps_done"], mine["tokens"]))
+            assert mine["profile"] == "customs_claim" and m["today"]["tokens"] >= mine["tokens"] and (mine["calls"] == 0) == (mine["tokens"] == 0)
+        elif seen:
+            break
+        time.sleep(0.03)
+    case = svc.case(T, ref)
+    assert case["progress"]["state"] == "done" and seen == sorted(seen), "the figure only ever goes up"
+    assert len({t for t in seen if t}) >= 3, f"the meter moved several times while the case ran: {sorted(set(seen))}"
+    by_step: dict[int, set[int]] = {}
+    for done, tokens in steps:
+        by_step.setdefault(done, set()).add(tokens)
+    assert any(len(v) > 1 for v in by_step.values()), "it moves within one agent's step (the calls of one agent are counted one by one), not only between steps"
+    time.sleep(1.05)   # one count serves every window for a second
+    after, own = svc.live(T), SP.totals(case)
+    assert after["running"] == [] and after["today"]["calls"] == after["all"]["calls"] == own["calls"] == len(model.calls) and after["today"]["tokens"] == after["all"]["tokens"] == own["tokens"]
+    assert after["today"]["cost"] == after["all"]["cost"] == own["cost"] > 0 and after["today"]["basis"] == "list" and after["today"]["cases"] == after["all"]["cases"] == 1 and after["currency"] == "USD"
+    assert svc.observability(T)["totals"]["tokens"] == after["all"]["tokens"], "the meter and Observability are one count"
+    # a second case, a pause, and a case the model was not used for
+    other = svc.assess(T, svc.load_sample(T, "customs_claim", "review")["reference"])
+    svc.set_spend(T, {"paused": True, "note": "for the test"})
+    quiet = svc.assess(T, svc.load_sample(T, "supplier_invoice", "clean")["reference"])
+    time.sleep(1.05)
+    both = svc.live(T)
+    assert both["paused"] is True and both["cases"] == 3 and both["all"]["cases"] == 2 and SP.totals(quiet)["calls"] == 0
+    assert both["all"]["tokens"] == own["tokens"] + SP.totals(other)["tokens"] and abs(both["all"]["cost"] - own["cost"] - SP.totals(other)["cost"]) < 1e-6
+    assert svc.live("another-tenant")["all"]["calls"] == 0, "a workspace's meter is its own"
+    assert svc.ledger(T).verify()["ok"]
+
+
+def test_the_meter_over_the_api(live):
+    call, service = live
+    for path in ("/api/live", "/api/v1/observability/live"):
+        status, m = call("GET", path)
+        assert status == 200 and set(m) >= {"as_of", "day", "currency", "today", "all", "running", "paused", "model", "cases"} and m["model"]["connected"] is False and m["all"]["calls"] == 0, (path, m)
+        assert call("GET", path, key=None)[0] == 401, "the meter is behind the same key as everything else"
+    status, made = call("POST", "/api/samples", {"profile": "customs_claim", "sample": "positive"})
+    assert status == 201
+    for _ in range(300):
+        if (service.case(T, made["reference"]).get("progress") or {}).get("state") in ("done", "failed"):
+            break
+        time.sleep(0.03)
+    time.sleep(1.05)
+    status, m = call("GET", "/api/live")
+    assert status == 200 and m["cases"] == 1 and m["running"] == [] and m["all"]["calls"] == 0, "offline: a case was assessed and nothing was spent"

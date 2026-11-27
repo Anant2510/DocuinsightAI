@@ -21,6 +21,67 @@ def now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+DEFAULT_CURRENCIES = ["USD", "EUR", "GBP", "INR", "AED", "AUD", "CAD", "CHF", "JPY", "SGD"]   # offered for an amount when the use case names none of its own
+
+
+def case_facts(profile: Profile, fields: dict[str, Any] | None) -> tuple[dict[str, Any], list[str]]:
+    """The facts a case is registered with, held to what the use case declares: (the facts as they are kept, what is wrong with them).
+    A fact marked `required` must be given, on every way in (the form, the API, the layer). A required date must be a date and is kept as
+    yyyy-mm-dd; a required amount must carry its currency and is kept as "GBP 1,233.60"; a fact with `options` must be one of them.
+    A fact the use case puts no condition on is kept as it was given, as before."""
+    out, wrong = dict(fields or {}), []
+    order = (profile.formats or {}).get("dates") or "day_first"
+    for f in profile.case.get("fields") or []:
+        fid, name, kind = f["id"], f.get("name") or f["id"], f.get("type", "text")
+        raw = out.get(fid)
+        raw = f.get("default") if raw in (None, "") or (isinstance(raw, str) and not raw.strip()) else raw
+        must, options = bool(f.get("required")), [str(o) for o in f.get("options") or []]
+        eg = f"{str((f.get('currencies') or ['GBP'])[0]).upper()} 1,233.60"
+        if raw in (None, ""):
+            if must:
+                wrong.append(f"{name} is needed" + (f" (an amount with its currency, for example {eg})" if kind == "money" else " (a date, yyyy-mm-dd)" if kind == "date" else
+                                                    f" (one of: {'; '.join(options)})" if options else ""))
+            continue
+        if not (must or options):
+            continue   # no condition declared: kept as given
+        if isinstance(raw, (list, tuple, set)) or (isinstance(raw, dict) and kind != "money"):
+            wrong.append(f"{name} is one value, not a list")
+            continue
+        if options:
+            match = next((o for o in options if o.strip().lower() == str(raw).strip().lower()), None)
+            if match is None:
+                wrong.append(f"{name} is one of: {'; '.join(options)}")
+                continue
+            out[fid] = match
+        elif kind == "date":
+            iso = V.parse_date(str(raw), order)
+            if not iso:
+                wrong.append(f"{name} is not a date (yyyy-mm-dd)")
+                continue
+            out[fid] = iso
+        elif kind == "money":
+            money = V.parse_money(raw)
+            if money is not None:
+                money["currency"] = str(money.get("currency") or "").strip().upper()
+            allowed = [str(c).upper() for c in f.get("currencies") or []]
+            if money is None or money["amount"] != money["amount"] or abs(money["amount"]) == float("inf"):
+                wrong.append(f"{name} is not an amount")
+            elif money["amount"] <= 0:
+                wrong.append(f"{name} must be more than zero")
+            elif not money.get("currency") or money["currency"] not in V.CURRENCIES:
+                wrong.append(f"{name} needs its currency (for example {eg})")
+            elif allowed and money["currency"] not in allowed:
+                wrong.append(f"{name} is in {money['currency']}; this use case takes {', '.join(allowed)}")
+            else:
+                out[fid] = V.display(money)
+        elif kind == "number":
+            if V.parse_number(raw) is None:
+                wrong.append(f"{name} is not a number")
+        else:
+            out[fid] = str(raw).strip()[:300]
+    return out, wrong
+
+
 def new_case(reference: str, profile: Profile, fields: dict[str, Any] | None = None, *, by: str = "intake") -> dict[str, Any]:
     case: dict[str, Any] = {"reference": reference, "profile": profile.id, "profile_version": profile.version, "created_at": now(), "status": "registered",
                             "fields": {}, "documents": [], "assessment": None, "history": [], "events": [], "reviews": [], "decision": None, "chat": [],

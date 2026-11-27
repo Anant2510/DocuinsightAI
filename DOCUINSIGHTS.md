@@ -38,7 +38,7 @@ Nothing in the engine names a customer or an industry. A use case is a **profile
 
 | Section | What it declares |
 | --- | --- |
-| `case` | the case facts asked for at intake (dates, type, flags that switch conditional evidence on) |
+| `case` | the case facts asked for at intake (dates, type, flags that switch conditional evidence on). A fact may be `required` (a case is not registered without it), have `options` (the values it can take) and, for an amount, `currencies` |
 | `document_types` | each type, the phrases that signal it, and its fields with their types and labels |
 | `entities` | which fields are party mentions (and in which role), goods descriptions, references, product characteristics |
 | `evidence` | mandatory, conditional (`when: case.<flag>`) and alternative (`any_of`) evidence |
@@ -420,6 +420,20 @@ At a limit a model call waits. Past the wait it is not made: the agent falls bac
 is marked degraded and says how many calls were not made. Nothing fails because the model is busy. On the CX Nova
 layer the model limiter and the budgets apply; the API gate does not (the layer applies its own).
 
+### The facts a case is registered with
+
+A use case declares the facts a case is registered with (`case.fields`), and which of them are mandatory. The Create a
+case form is drawn from that declaration: a mandatory fact is marked and the form does not submit without it, a fact
+with `options` is a pick-list, and an amount has its currency beside it. The same declaration is enforced by the
+service, so the API (`POST /api/v1/cases`), the workbench and the layer's intake agent all refuse a case that lacks a
+mandatory fact, and say which, all at once. A mandatory date must be a real date (kept as `yyyy-mm-dd`); a mandatory
+amount must be more than zero and carry a currency the use case takes (kept as `GBP 1,233.60`, whether it arrived as
+`£1,233.60`, `1.233,60 GBP` or `{"amount": 1233.6, "currency": "GBP"}`).
+
+The customs use case asks for four: **Claim type** (Overpayment claim; add a line to `options` for each further kind
+of claim the team handles), **Claimed amount** with its currency (GBP, EUR, USD, INR), **Relevant date** and
+**Claim received**. A use case that marks nothing as required registers a case as before.
+
 ### Rules a business makes its own
 
 The rules that ship are a starting point with sample limits. The **Rules** screen is where the people who own the
@@ -565,6 +579,14 @@ estimate from the next call on; what was estimated stays marked as estimated. A 
 installation working in another currency, and one that sets `DOCUINSIGHTS_LIST_PRICES=0` get no assumed price: spend
 is then shown in tokens only, and a call made with no price is never priced afterwards. What a workspace changes on
 the portal is kept in `<data>/<tenant>/spend.json` and laid over the installation's settings.
+
+**The live meter** is one line under the top bar on every screen and on every case: what the model has cost today
+and in all, the case in front of you ("so far" while it runs), and the cases being assessed at this moment. It moves
+with each model call, not when an agent has finished: a call is counted and saved the moment it returns. The line is
+repainted in place, so nothing a person is typing is disturbed, and the Observability screen follows it by itself
+(a *Running now* table appears while cases run). `GET /api/v1/observability/live` returns the same count for another
+system's own dashboard. It is the same count as every other spend figure, read from the case files, asked for often;
+one count serves every open window for a second.
 
 **Observability** (its own screen, and `GET /api/v1/observability`) is the workspace seen through what its agents did
 and what that cost: token cost, tokens, model calls and the average time of a call; tokens and cost by day; by agent;
@@ -744,8 +766,10 @@ record that is down, answers with an error page, wraps its answer, says "no such
 an adapter that raises, returns nonsense or invents a status; a credential that must appear nowhere; rules changed,
 added, switched off and taken back, with every finding keeping the rule as it stood; twenty-four changes that must be
 refused; a rules workbook filled in and saved by a spreadsheet; a sheet in the Windows code page and with semicolons;
-a formula in a cell; an administrator key that casework does not need and governance does. Together the two files
-hold 286 tests. They read no setting of the machine they run
+a formula in a cell; an administrator key that casework does not need and governance does; a rule of the workspace's
+own that the build can no longer run, and a rules file that cannot be read; twenty ways to register a case without a
+fact its use case needs, on the form's API, the integration API and the samples; the live meter moving with each call
+while a case runs and adding up to the case files afterwards. Together the two files hold 309 tests. They read no setting of the machine they run
 on, and pass with and without an OCR engine installed.
 
 ## What is not built yet

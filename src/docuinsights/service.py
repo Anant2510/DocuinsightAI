@@ -22,7 +22,7 @@ from typing import Any
 from . import assurance, checks, contracts as C, extras, harness as H, kb as KB, model as M, net, ontology as O, pipeline as P, reader, reports, repository as Repo, rulebook as RB, spend as S, systems as SYS, throttle as T
 from .ledger import Ledger, digest
 from .memory import SCOPES, Episodes
-from .casefile import current, doc_type, event, live_docs, new_case, now
+from .casefile import case_facts, current, doc_type, event, live_docs, new_case, now
 from .profiles import Profile, ProfileError, get_profile, load_profiles
 from .store import CaseStore, safe
 
@@ -65,6 +65,7 @@ class Service:
         self.limiter = T.Limiter.from_env()
         self.gate = T.RequestGate.from_env()
         self.key_attempts = T.KeyAttempts.from_env()
+        self._meter: dict[str, tuple[float, dict[str, Any]]] = {}   # the live meter, held for a second for all the windows that ask (live())
         self.max_assessments = max(1, int(T._env("DOCUINSIGHTS_MAX_ASSESSMENTS", 2)))
         self._slots = threading.BoundedSemaphore(self.max_assessments)
         self._kb: dict[str, KB.KnowledgeBase] = {}
@@ -198,9 +199,51 @@ class Service:
                        limiter=self.limiter, episodes=self.episodes(tenant), ledger=self.ledger(tenant) if record else None,
                        on_finish=(lambda c: (self.learn(tenant, c), self.notify(tenant, c, "case.assessed"))) if record else None,
                        ground=(lambda agent, c, prof, classes: kb.grounding(prof.name, classes)) if kb.built() else None,
-                       gate=lambda c, docs, size=0: self._may_call(tenant, c, docs, size), spend=lambda c, agent_id, calls, docs: S.record(c, agent_id, calls, docs, self.spend_settings(tenant).read()),
+                       gate=lambda c, docs, size=0: self._may_call(tenant, c, docs, size), spend=lambda c, agent_id, calls, docs: self._count(tenant, c, agent_id, calls, docs, live=progress),
                        stopped=lambda c: self._stopped(tenant, c), price=lambda call: S.cost_of(call, self.spend_settings(tenant).read()),
                        lookup=lambda sysd, key: self._lookup(tenant, case, sysd, key))
+
+    def _count(self, tenant: str, case: dict[str, Any], agent_id: str, calls: list[dict[str, Any]], docs: list[str] | None, *, live: bool) -> None:
+        """Count the calls an agent just made, and (for a case being assessed in view of its workbench) save the case there and then:
+        the meter on the screen moves with each call, not only when the agent has finished."""
+        S.record(case, agent_id, calls, docs, self.spend_settings(tenant).read())
+        if live and calls:
+            try:
+                self.store.save(tenant, case)
+            except OSError:
+                pass   # the count is in the case and is saved with the agent's step: a meter that lags is not a reason to stop the work
+            self._meter.pop(tenant, None)
+
+    def live(self, tenant: str) -> dict[str, Any]:
+        """The workspace's meter: what the model has cost today and in all, and the cases being assessed at this moment with what each has
+        spent so far. Counted from the case files like every other figure. It is asked every few seconds by each open window, so one count
+        serves them all for a second."""
+        import time as _time
+
+        held = self._meter.get(tenant)
+        if held and _time.monotonic() - held[0] < 1.0:
+            return held[1]
+        settings = self.spend_settings(tenant).read()
+        rows = self.store.list(tenant)
+        day = now()[:10]
+
+        def total(parts: list[dict[str, Any]]) -> dict[str, Any]:
+            t = S._blank()
+            for part in parts:
+                for k in S.SUMS:
+                    t[k] = round(t[k] + (part.get(k) or 0), 6)
+            t.update(calls=int(t["calls"]), input_tokens=int(t["input_tokens"]), output_tokens=int(t["output_tokens"]), tokens=int(t["input_tokens"] + t["output_tokens"]), basis=S.basis_of(t))
+            return t
+
+        running = [r for r in rows if r.get("state") == "running"]
+        out = {"as_of": now(), "day": day, "currency": settings.get("currency") or "USD", "cases": len(rows), "paused": bool(settings.get("paused")),
+               "model": {"connected": not getattr(self.model, "offline", True)},
+               "today": {**total([(r.get("spend_days") or {}).get(day) or {} for r in rows]), "cases": sum(1 for r in rows if ((r.get("spend_days") or {}).get(day) or {}).get("calls"))},
+               "all": {**total([r.get("spend") or {} for r in rows]), "cases": sum(1 for r in rows if (r.get("spend") or {}).get("calls"))},
+               "running": [{"reference": r["reference"], "profile": r["profile"], "stage": r.get("stage") or "", "steps_done": r.get("steps_done") or 0, "model_off": bool(r.get("model_off")),
+                            **{k: v for k, v in total([r.get("spend") or {}]).items() if k in ("calls", "tokens", "input_tokens", "output_tokens", "cost", "basis", "failed")}} for r in running]}
+        self._meter[tenant] = (_time.monotonic(), out)
+        return out
 
     # ------------------------------------------------------------------ the workspace's own rules, and the systems of record they are run against
     def rulebook(self, tenant: str, profile_id: str) -> RB.Rulebook:
@@ -508,7 +551,9 @@ class Service:
     def create_case(self, tenant: str, reference: str, profile_id: str | None, fields: dict[str, Any] | None = None, *, by: str = "caseworker") -> dict[str, Any]:
         profile = self._p(tenant, profile_id)
         reference = safe((reference or "").strip(), "case reference")
-        fields = fields if isinstance(fields, dict) else {}
+        fields, wrong = case_facts(profile, fields if isinstance(fields, dict) else {})
+        if wrong:   # the same on every way in: the form, the API and the layer's intake agent
+            raise ServiceError(f"A {profile.name} case cannot be registered yet: " + "; ".join(wrong) + ".")
         with self._hold(tenant, reference):
             if self.store.exists(tenant, reference):
                 raise ServiceError(f"case '{reference}' already exists", 409)

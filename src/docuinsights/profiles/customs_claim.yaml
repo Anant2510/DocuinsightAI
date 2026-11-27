@@ -24,10 +24,13 @@ case:
   reference_label: Case reference
   reference_example: CLM-2026-000184
   fields:
-    - {id: claim_type, name: Claim type, type: text}
-    - {id: claimed_amount, name: Claimed amount, type: money}
-    - {id: relevant_date, name: Relevant date (tariff as-of), type: date, description: The event date the tariff and the rules are read for}
-    - {id: received_date, name: Claim received, type: date}
+    # required: a case cannot be registered without it, on the form, over the API or through the layer.
+    # options: the values it can take (add a line for each kind of claim the team handles). currencies: what the amount may be stated in.
+    - {id: claim_type, name: Claim type, type: text, required: true, options: [Overpayment claim], default: Overpayment claim}
+    - {id: claimed_amount, name: Claimed amount, type: money, required: true, currencies: [GBP, EUR, USD, INR],
+       description: "What the claimant asks to be repaid, with its currency"}
+    - {id: relevant_date, name: Relevant date (tariff as-of), type: date, required: true, description: The event date the tariff and the rules are read for}
+    - {id: received_date, name: Claim received, type: date, required: true, description: The day the claim reached you. The time limit and the service clock run from it}
     - {id: physical_goods, name: Physical goods moved, type: text, default: "yes"}
     - {id: classification_in_question, name: Classification in question, type: text, default: "yes"}
 
@@ -372,7 +375,7 @@ samples:
     title: Review path
     story: The packing list is missing and the invoice carries no commodity code. One file was uploaded under the wrong category.
     path: customs_claim
-    case: {reference: CLM-2026-000184, claim_type: Repayment of import duty, claimed_amount: "GBP 1,233.60", relevant_date: "2026-11-03", received_date: "2026-11-20"}
+    case: {reference: CLM-2026-000184, claim_type: Overpayment claim, claimed_amount: "GBP 1,233.60", relevant_date: "2026-11-03", received_date: "2026-11-20"}
     documents:
       - {file: invoice_no_code.pdf, category: commercial_invoice}
       - {file: declaration.pdf, category: declaration}
@@ -383,7 +386,7 @@ samples:
     title: Positive path
     story: All evidence is present and consistent, and the product evidence supports the declared classification.
     path: customs_claim
-    case: {reference: CLM-2026-000185, claim_type: Repayment of import duty, claimed_amount: "GBP 1,233.60", relevant_date: "2026-11-03", received_date: "2026-11-20"}
+    case: {reference: CLM-2026-000185, claim_type: Overpayment claim, claimed_amount: "GBP 1,233.60", relevant_date: "2026-11-03", received_date: "2026-11-20"}
     documents:
       - {file: invoice.pdf, category: commercial_invoice}
       - {file: declaration.pdf, category: declaration}
@@ -395,7 +398,7 @@ samples:
     title: Contradiction path
     story: The package count, the amount paid, the consignee and the invoiced commodity code do not agree with the other evidence.
     path: customs_claim
-    case: {reference: CLM-2026-000186, claim_type: Repayment of import duty, claimed_amount: "GBP 1,233.60", relevant_date: "2026-11-03", received_date: "2026-11-20"}
+    case: {reference: CLM-2026-000186, claim_type: Overpayment claim, claimed_amount: "GBP 1,233.60", relevant_date: "2026-11-03", received_date: "2026-11-20"}
     documents:
       - {file: invoice_wrong_code.pdf, category: commercial_invoice}
       - {file: declaration.pdf, category: declaration}
@@ -407,7 +410,7 @@ samples:
     title: Temporal path
     story: The case is first assessed with an invoice that has no commodity code; an amended invoice then arrives and the case is assessed again.
     path: customs_claim
-    case: {reference: CLM-2026-000187, claim_type: Repayment of import duty, claimed_amount: "GBP 1,233.60", relevant_date: "2026-11-03", received_date: "2026-11-20"}
+    case: {reference: CLM-2026-000187, claim_type: Overpayment claim, claimed_amount: "GBP 1,233.60", relevant_date: "2026-11-03", received_date: "2026-11-20"}
     documents:
       - {file: invoice_no_code.pdf, category: commercial_invoice}
       - {file: declaration.pdf, category: declaration}

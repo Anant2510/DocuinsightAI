@@ -84,6 +84,8 @@ class CaseStore:
                          "open_findings": len(waiting), "watchlist_matches": sum(1 for f in waiting if f.get("agent") == "screening"),
                          "integrity_alerts": sum(1 for f in waiting if f.get("agent") == "integrity"), "state": (c.get("progress") or {}).get("state"),
                          "spend": {k: ((c.get("spend") or {}).get("totals") or {}).get(k, 0) for k in ("calls", "input_tokens", "output_tokens", "cost", "unpriced", "listed", "failed", "ms")},
+                         "spend_days": dict(sorted(((c.get("spend") or {}).get("days") or {}).items())[-3:]),   # the latest days of its own account: what the live meter sums
+                         "stage": (c.get("progress") or {}).get("stage") or "", "steps_done": len((c.get("progress") or {}).get("done") or []),
                          "model_off": bool((c.get("spend") or {}).get("model_off")), "currency": (c.get("spend") or {}).get("currency") or "USD"})
         return sorted(rows, key=lambda r: r.get("created_at") or "", reverse=True)
 

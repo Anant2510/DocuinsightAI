@@ -101,7 +101,7 @@
   // ---------------------------------------------------------------------------------------------- data
   async function start() {
     try { S.cfg = await api("config"); S.cases = await api("cases"); } catch (err) { if (err.status === 401) { root.replaceChildren(h("p", { class: "boot" }, "Waiting for a key…")); return signIn(err.message); } root.replaceChildren(h("p", { class: "boot" }, err.message)); return; }
-    render(); fromAddress();
+    render(); fromAddress(); meterTick();
   }
   const linked = () => { const m = /^#\/knowledge\/(.+)$/.exec(location.hash || ""); try { return m ? decodeURIComponent(m[1]) : null; } catch (err) { return null; } };
   function fromAddress() {   // a link to one node of the knowledge graph: open the graph on exactly that node
@@ -116,9 +116,52 @@
   function setCase(c, view) { S.c = c; if (view) S.view = view; watch(); render(); }
   function watch() {
     clearTimeout(S.timer);
-    if (!S.c || (S.c.progress || {}).state !== "running") return;
+    const busy = !!S.c && (S.c.progress || {}).state === "running";
+    if (busy !== S.wasBusy) { S.wasBusy = busy; meterSoon(); }   // a case started or finished in this window: the meter counts now, not at its next tick
+    if (!busy) return;
     S.timer = setTimeout(async () => { try { const c = await api("cases/" + encodeURIComponent(S.c.reference)); S.orch.ticks = (S.orch.ticks || 0) + 1; S.c = c; render(); watch(); } catch (e) { /* retry on the next tick */ watch(); } }, 700);
   }
+  // ---------------------------------------------------------------------------------------------- the live meter: what the model costs, counted as it is spent
+  // One line under the top bar, on every screen and on every case. It is painted in place when the count comes back, so nothing a person is
+  // typing is disturbed; the screens that are made of these figures (Observability) are drawn again only when a figure moved.
+  function meterBits() {
+    const m = S.live, c = S.c, cur = (m && m.currency) || "USD";
+    if (!m) return [h("span", { class: "mlead" }, h("i", { class: "dot" }), "Live meter"), h("span", { class: "ml" }, "Counting…")];
+    const busy = m.running.length > 0 || (c && (c.progress || {}).state === "running");
+    const fig = (label, t, tail) => h("span", { class: "mseg" }, h("span", { class: "ml" }, label), h("b", null, tok(t.tokens) + " tokens"), money({ ...t, currency: cur }) ? h("b", { class: "cost" }, money({ ...t, currency: cur })) : null,
+      h("span", { class: "ml" }, nCalls(t.calls) + (t.calls === 1 ? " call" : " calls") + (tail || "")));
+    const mine = c ? { ...((c.spend || {}).totals || {}) } : null;
+    if (mine) mine.tokens = (mine.input_tokens || 0) + (mine.output_tokens || 0);
+    const others = m.running.filter((r) => !c || r.reference !== c.reference);
+    return [h("span", { class: "mlead" + (busy ? " on" : ""), title: busy ? "A case is being assessed: the figures move as each model call is made." : "No case is being assessed at this moment." }, h("i", { class: "dot" }), busy ? "Live meter · counting" : "Live meter"),
+      !m.model.connected && !m.all.calls ? h("span", { class: "ml" }, "AI is offline, so nothing is being spent: documents are read by patterns, and rules and the recommendation are code.")
+        : [mine ? fig("This case", { calls: 0, ...mine }, (c.progress || {}).state === "running" ? " so far" : "") : null, fig("Today", m.today, m.today.cases ? " in " + m.today.cases + (m.today.cases === 1 ? " case" : " cases") : ""), mine ? null : fig("In all", m.all, "")],
+      m.paused ? h("span", { class: "pill review" }, "model use paused") : null,
+      others.length ? h("span", { class: "mseg run" }, h("span", { class: "ml" }, "Running now"), others.slice(0, 3).map((r) => h("button", { class: "mrun", onclick: run(() => open(r.reference, "monitor")), title: "Open " + r.reference },
+        h("span", { class: "mono" }, r.reference), " · " + tok(r.tokens) + " tokens" + (money({ ...r, currency: cur }) ? " · " + money({ ...r, currency: cur }) : ""))), others.length > 3 ? h("span", { class: "ml" }, "+" + (others.length - 3) + " more") : null) : null,
+      h("span", { class: "right" }), (m.today.listed || m.all.listed) ? h("span", { class: "ml", title: EST }, "est. = at list price") : null,
+      S.view === "observability" && !c ? null : h("button", { class: "mlink", onclick: c ? go("spend") : top("observability") }, c ? "Where it went" : "Observability")];
+  }
+  const meterSig = (m) => (m ? [m.all.calls, m.all.tokens, m.cases, m.paused, m.running.map((r) => r.reference + ":" + r.steps_done + ":" + r.tokens).join(",")].join("|") : "");
+  const typing = () => { const el = document.activeElement; return !!document.querySelector(".modal") || !!(el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)); };
+  let meterTimer = null, meterAsking = false, meterAgain = false;
+  async function meterTick() {
+    clearTimeout(meterTimer);
+    if (meterAsking) { meterAgain = true; return; }   // one count at a time: a second ask waits for the first and follows it
+    meterAsking = true;
+    if (S.cfg && !document.hidden) {
+      try {
+        const m = await api("live"), moved = meterSig(m) !== meterSig(S.live); S.live = m;
+        const el = document.getElementById("meter"); if (el) { el.replaceChildren(); add(el, meterBits()); }
+        if (moved && !S.c && S.view === "observability" && !typing()) { S.ob = await api("observability"); S.sp = await api("spend"); const y = window.scrollY; render(); window.scrollTo(0, y); }   // the screen made of these figures follows them
+      } catch (err) { /* a count that could not be fetched is asked for again on the next tick */ }
+    }
+    meterAsking = false;
+    const busy = S.live && (S.live.running.length || (S.c && (S.c.progress || {}).state === "running"));
+    clearTimeout(meterTimer); meterTimer = setTimeout(meterTick, meterAgain ? 120 : busy ? 1200 : 2500); meterAgain = false;
+  }
+  function meterSoon() { clearTimeout(meterTimer); meterTimer = setTimeout(meterTick, 120); }
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) meterSoon(); });
   const go = (view) => () => { if (view !== "monitor") { clearInterval(S.orch.timer); S.orch.playing = false; } S.view = view; render(); window.scrollTo(0, 0); };
   function openSource(s) { if (!s.doc || s.doc === "case") return; S.view = "documents"; S.sel.doc = s.doc; S.sel.line = s.page ? { page: s.page, line: s.line } : null; render(); }
 
@@ -153,7 +196,7 @@
     if (S.c && !a && !["monitor", "documents", "spend"].includes(S.view)) S.view = "monitor";
     add(main, (views[S.view] || home)());
     const shell = h("div", { class: "shell" + (S.c ? "" : " wide") }, S.c ? rail(running) : null, main);
-    root.replaceChildren(...[bar, shell, S.c && a ? chat() : null].filter(Boolean));
+    root.replaceChildren(...[bar, h("div", { class: "meter", id: "meter", role: "status", "aria-label": "Live meter: what the model has cost" }, meterBits()), shell, S.c && a ? chat() : null].filter(Boolean));
     const cv = document.querySelector(".gx-canvas");   // the explorer fits its scene to the canvas as it really is
     if (cv) { const w = Math.round(cv.getBoundingClientRect().width); if (w && Math.abs(w - kArea().w) > 2) { S.k.cw = w; S.k.tf = null; render(); } }
   }
@@ -260,11 +303,26 @@
     const drop = h("div", { class: "drop", tabindex: 0, onclick: () => fileInput.click(), ondragover: (e) => { e.preventDefault(); drop.classList.add("over"); }, ondragleave: () => drop.classList.remove("over"), ondrop: (e) => { e.preventDefault(); pick(e.dataTransfer.files); } },
       "Drop the evidence package here, or click to choose files", h("div", { class: "small" }, "PDF, Word, Excel, email (with its attachments), web page, text, CSV or a scan (PNG, JPEG), up to " + (S.cfg.max_file_mb || 15) + " MB each"));
     const fileInput = h("input", { type: "file", multiple: true, accept: (S.cfg.accepts || [".pdf", ".png", ".jpg", ".jpeg", ".txt"]).join(","), style: "display:none", onchange: (e) => pick(e.target.files) });
+    const factField = (f) => {   // one case fact, as the use case declares it: mandatory or not, a choice, an amount with its currency, a date
+      const label = h("span", null, f.name, f.required ? h("span", { class: "req", title: "Needed to register the case" }, " *") : null), hint = f.description ? h("small", { class: "hint" }, f.description) : null;
+      if (d.fields[f.id] === undefined && f.default) d.fields[f.id] = f.default;
+      if (f.type === "money") {   // kept as one value, "GBP 1,233.60": the amount and the currency it is stated in
+        const m = (d.money = d.money || {})[f.id] || (d.money[f.id] = { cur: (f.currencies || ["USD"])[0], amt: "" });
+        const put = () => { d.fields[f.id] = m.amt.trim() ? m.cur + " " + m.amt.trim() : ""; };
+        return h("div", { class: "f" }, label, h("div", { class: "moneyin" },
+          h("select", { "aria-label": f.name + ": currency", required: !!f.required, onchange: (e) => { m.cur = e.target.value; put(); } }, (f.currencies || ["USD"]).map((c) => h("option", { value: c, selected: c === m.cur }, c))),
+          h("input", { type: "text", inputmode: "decimal", "aria-label": f.name + ": amount", required: !!f.required, pattern: "\\s*[0-9][0-9.,' ]*", title: "An amount, for example 1,233.60", placeholder: "1,233.60", value: m.amt, autocomplete: "off",
+            oninput: (e) => { m.amt = e.target.value; put(); } })), hint);
+      }
+      if ((f.options || []).length) return h("label", { class: "f" }, label, h("select", { required: !!f.required, onchange: (e) => (d.fields[f.id] = e.target.value) },
+        f.options.length > 1 && !f.default ? h("option", { value: "" }, "Choose…") : null, f.options.map((o) => h("option", { value: o, selected: (d.fields[f.id] || f.default) === o }, o))), hint);
+      return h("label", { class: "f" }, label, h("input", { type: f.type === "date" ? "date" : "text", required: !!f.required, value: d.fields[f.id] || "", oninput: (e) => (d.fields[f.id] = e.target.value) }), hint);
+    };
     return [section("Create a case", "Register the case, give the case facts the rules need, and upload the evidence package. Each file is kept as an immutable version with its hash."),
       h("form", { class: "stack", onsubmit: run(async () => { const c = await api("cases", { reference: d.reference, profile: d.profile, fields: d.fields, documents: d.files, assess: true }); S.sel.draft = null; S.cases = await api("cases"); open(c.reference, "monitor"); }) },
-        cardOf("Case", h("div", { class: "grid g3" }, h("label", { class: "f" }, h("span", null, "Use case"), h("select", { onchange: (e) => { d.profile = e.target.value; d.fields = {}; render(); } }, S.cfg.profiles.map((x) => h("option", { value: x.id, selected: x.id === d.profile }, x.name)))),
+        cardOf("Case", h("div", { class: "grid g3" }, h("label", { class: "f" }, h("span", null, "Use case"), h("select", { onchange: (e) => { d.profile = e.target.value; d.fields = {}; d.money = {}; render(); } }, S.cfg.profiles.map((x) => h("option", { value: x.id, selected: x.id === d.profile }, x.name)))),
           h("label", { class: "f" }, h("span", null, p.case.reference_label || "Case reference"), h("input", { type: "text", required: true, value: d.reference, placeholder: p.case.reference_example || "", oninput: (e) => (d.reference = e.target.value.trim()) })),
-          (p.case.fields || []).map((f) => h("label", { class: "f" }, h("span", null, f.name), h("input", { type: f.type === "date" ? "date" : "text", value: d.fields[f.id] || f.default || "", oninput: (e) => (d.fields[f.id] = e.target.value) }))))),
+          (p.case.fields || []).map(factField)), (p.case.fields || []).some((f) => f.required) ? h("p", { class: "small muted", style: "margin-top:10px" }, h("span", { class: "req" }, "*"), " needed to register the case.") : null),
         cardOf("Evidence package", drop, fileInput, d.files.length ? h("table", { style: "margin-top:10px" }, h("thead", null, h("tr", null, ["File", "Size", "Uploaded as", ""].map((x) => h("th", null, x)))), h("tbody", null, d.files.map((f, i) => h("tr", null, h("td", null, f.name), h("td", { class: "small muted" }, Math.round(f.size / 1024) + " KB"),
           h("td", null, h("select", { onchange: (e) => (f.category = e.target.value) }, h("option", { value: "" }, "Other documents"), p.document_types.map((t) => h("option", { value: t.id, selected: f.category === t.id }, t.name)))), h("td", null, h("button", { class: "btn sm ghost", type: "button", onclick: () => { d.files.splice(i, 1); render(); } }, "Remove")))))) : null),
         h("div", { class: "row" }, h("button", { class: "btn primary", type: "submit", disabled: !d.files.length }, "Create and assess"), h("button", { class: "btn", type: "button", onclick: top("cases") }, "Cancel")))];
@@ -483,7 +541,7 @@
   let kLay = null, kTap = { id: null, t: 0 };
   const kWide = () => (S.k.cw || Math.max(640, document.documentElement.clientWidth - 54));
   const kLeftOpen = () => (S.k.left === null ? kWide() >= 1180 : S.k.left);   // on a narrow canvas the filters start closed, so the graph has the room
-  const kArea = () => ({ w: kWide(), h: Math.max(500, window.innerHeight - 188), left: kLeftOpen() ? 306 : 14, right: S.k.e || S.k.grp ? 396 : 14, top: 80, bottom: 46 });
+  const kArea = () => ({ w: kWide(), h: Math.max(500, window.innerHeight - 222), left: kLeftOpen() ? 306 : 14, right: S.k.e || S.k.grp ? 396 : 14, top: 80, bottom: 46 });
   function kScene() {   // what is on the scene, as a forest: the levels' boxes, the heads each opened, and under each entity what was drilled open
     const m = S.k.m, sel = S.k.e ? S.k.e.entity.id : null, keep = new Set(S.k.e ? S.k.e.trail.map((x) => x.id) : []), hide = new Set(S.k.hideT || []), by = {}, shown = {};
     m.nodes.forEach((n) => (by[n.id] = n));
@@ -924,12 +982,14 @@
     const pctOf = lim.share ? Math.min(100, Math.round(lim.share * 100)) : 0;
     return h("div", { class: "card spendstrip" },
       h("div", { class: "sp-main" }, h("span", { class: "small muted" }, running ? "Spent so far" : "Spent on this case"), h("b", null, t.calls ? tok(t.tokens) + " tokens" : "Nothing"), money(t) ? h("b", { class: "cost" }, money(t)) : t.calls ? h("span", { class: "small muted" }, "no price set") : null,
-        h("span", { class: "small muted" }, nCalls(t.calls) + " model call(s)" + (t.failed ? ", " + nCalls(t.failed) + " failed" : "") + (money(t) && t.unpriced ? ", " + nCalls(t.unpriced) + " made before a price was set" : ""))),
+        h("span", { class: "small muted" }, t.calls ? nCalls(t.calls) + " model call(s)" + (t.failed ? ", " + nCalls(t.failed) + " failed" : "") + (money(t) && t.unpriced ? ", " + nCalls(t.unpriced) + " made before a price was set" : "")
+          : S.cfg.model.offline ? "AI is offline: this case is read by patterns and checked by rules, which cost nothing." : running ? "No model call yet. The figure moves as each call is made." : "No model call was needed for this case.")),
       lim.case_token_limit || lim.case_cost_limit ? h("div", { class: "sp-meter", title: "Against the limit for one case" }, h("span", { class: "tr" }, h("i", { class: pctOf >= 100 ? "full" : pctOf >= 80 ? "near" : "", style: "width:" + pctOf + "%" })),
         h("span", { class: "small muted" }, pctOf + "% of " + (lim.case_token_limit ? tok(lim.case_token_limit) + " tokens" : "") + (lim.case_token_limit && lim.case_cost_limit ? " / " : "") + (lim.case_cost_limit ? (t.currency || "USD") + " " + lim.case_cost_limit : ""))) : null,
       st ? h("div", { class: "sp-state" }, pill(st[0], st[0] === "fail" ? "stopped" : "held"), h("span", { class: "small" }, st[1])) : null,
       h("div", { class: "row sp-act" }, running && !(S.c.stop_requested && S.c.stop_requested.mode === "assessment") ? h("button", { class: "btn sm danger", onclick: stopRun, title: "Ends the assessment before its next agent. Nothing of it is kept." }, "Stop the assessment") : null,
-        off ? (sp.model_off ? h("button", { class: "btn sm", onclick: resumeModel }, "Let it use the model again") : null) : h("button", { class: "btn sm" + (running ? " danger" : ""), onclick: stopModel, title: "No further model call for this case. The agents carry on with patterns and rules." }, "Stop model use"),
+        off ? (sp.model_off ? h("button", { class: "btn sm", onclick: resumeModel }, "Let it use the model again") : null)
+          : S.cfg.model.offline && !t.calls ? null : h("button", { class: "btn sm" + (running ? " danger" : ""), onclick: stopModel, title: "No further model call for this case. The agents carry on with patterns and rules." }, "Stop model use"),
         full ? null : h("button", { class: "btn sm ghost", onclick: go("spend") }, "Where it went")));
   }
   function spendView() {
@@ -960,9 +1020,13 @@
     const tile = (v, l, sub) => h("div", { class: "tile" }, h("b", null, v), h("span", null, l), sub ? h("small", { class: "muted" }, sub) : null);
     const th = (xs, right) => h("thead", null, h("tr", null, xs.map((x, i) => h("th", { style: i >= right ? "text-align:right" : null }, x)))), num = (v) => h("td", { class: "mono small", style: "text-align:right" }, v);
     const topDay = Math.max(1, ...o.by_day.map((d) => d.tokens)), topAgent = Math.max(1, ...o.by_agent.map((a) => a.tokens)), topDoc = Math.max(1, ...o.by_document.map((d) => d.tokens)), reasons = Object.entries(o.held.reasons || {});
-    const none = !o.totals.calls;
+    const none = !o.totals.calls, lv = S.live, runningNow = (lv && lv.running) || [];
     return [section("Observability", "What the agents did and what it cost: every model call counted against its case, by day, agent, case and document, with the time it took, what failed and what was held back. Rules, checks and the recommendation are code and cost nothing."),
+      h("p", { class: "small muted livenote" }, h("i", { class: "dot" + (runningNow.length ? " on" : "") }), runningNow.length ? "Live: " + runningNow.length + " case(s) being assessed. This screen follows each model call as it is made." : "Live: this screen counts again by itself whenever a model call is made."),
       h("div", { class: "viz stack" },
+        runningNow.length ? cardOf("Running now", h("table", null, th(["Case", "Use case", "Steps done", "Model calls", "Tokens so far", "Cost so far"], 2), h("tbody", null, runningNow.map((r) => h("tr", { class: "click", onclick: run(() => open(r.reference, "monitor")) },
+          h("td", { class: "mono" }, r.reference, r.model_off ? h("span", { class: "pill review", style: "margin-left:6px" }, "model off") : null), h("td", { class: "small" }, (S.cfg.profiles.find((p) => p.id === r.profile) || {}).name || r.profile), num(r.steps_done + " of " + S.cfg.stages.length),
+          num(nCalls(r.calls)), num(tok(r.tokens)), h("td", { class: "mono", style: "text-align:right;font-weight:600" }, m(r))))))) : null,
         h("div", { class: "grid g4" }, tile(m(t), "token cost" + (t.listed ? ", estimated at list price" : ""), o.cases_with_spend ? m({ calls: 1, cost: o.average_cost, listed: t.listed }) + " a case on average" : null), tile(tok(t.tokens), "tokens", tok(t.input_tokens) + " in · " + tok(t.output_tokens) + " out"),
           tile(nCalls(t.calls), "model calls", o.cases_with_spend + " of " + o.cases + " case(s) used the model"), tile(t.calls ? (t.average_ms >= 1000 ? (t.average_ms / 1000).toFixed(1) + " s" : t.average_ms + " ms") : "–", "average time for a call", nCalls(t.failed) + " failed · " + nCalls(o.held.calls) + " held back")),
         none ? h("div", { class: "card" }, h("b", null, o.model.connected ? "No model call has been made in this workspace yet." : "AI is offline, so nothing has been spent."), h("p", { class: "small muted", style: "margin-top:4px" }, o.model.connected ? "Assess a case and its calls, tokens and cost appear here as they are made." : "Documents are read by patterns, and rules and the recommendation are code. Connect a model and every call it makes is counted here.")) : null,
@@ -1400,7 +1464,7 @@
     return [section("Agent orchestration", "Watch the case move. The boss agent plans each step, the harness runs each agent under its contract, and every agent works from the same knowledge graph and the same shared memory. Play it back, or click any part for its detail."),
       pr.state === "failed" ? h("div", { class: "banner review", style: "margin-bottom:14px" }, h("b", null, "The assessment stopped at " + pr.stage), h("p", null, pr.error)) : null,
       pr.state === "stopped" ? h("div", { class: "banner review", style: "margin-bottom:14px" }, h("b", null, "The assessment was stopped"), h("p", null, pr.error), h("div", { style: "margin-top:8px" }, h("button", { class: "btn sm primary", onclick: run(async () => setCase(await api("cases/" + S.c.reference + "/assess", {}))) }, "Assess the case again"))) : null,
-      (S.c.spend && (S.c.spend.totals.calls || pr.state === "running" || spendState())) ? h("div", { style: "margin-bottom:14px" }, spendStrip()) : null,
+      h("div", { style: "margin-bottom:14px" }, spendStrip()),
       orchestration(), h("div", { style: "height:16px" }),
       cardOf("Agent runs", runs.length ? h("table", null, h("thead", null, h("tr", null, ["Run", "Agent", "Status", "Contract", "Time", "Model", "Prompt", "Tool calls", "Graph writes", "Tokens in / out", "Cost"].map((x) => h("th", null, x)))), h("tbody", null, runs.map((r) => h("tr", null, h("td", { class: "mono small" }, r.id), h("td", null, h("b", null, r.name), h("div", { class: "small muted" }, r.summary)), h("td", null, pill(r.status === "ok" ? "pass" : r.status === "failed" ? "fail" : "review", r.status), (r.notes || []).map((n) => h("div", { class: "small muted" }, n))),
         h("td", null, r.contract ? [pill(r.contract.kept ? "pass" : "fail", r.contract.kept ? "kept" : "not kept"), h("div", { class: "small muted" }, r.contract.promises.length + " promise(s) checked" + (r.memory && r.memory.reads.length ? " · read " + r.memory.reads.join(", ") : "") + (r.throttle && r.throttle.waited_ms ? " · waited " + r.throttle.waited_ms + " ms" : "")), (r.contract.broken || []).map((b) => h("div", { class: "small", style: "color:var(--bad)" }, b))] : "–"),

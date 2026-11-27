@@ -66,6 +66,23 @@ class Profile:
             for f in t.get("fields") or []:
                 if f.get("type", "text") not in FIELD_TYPES:
                     raise ProfileError(f"{self.id}: field {tid}.{f.get('id')} has unknown type '{f.get('type')}'")
+        for f in self.case.get("fields") or []:   # the facts a case is registered with: what a form shows and what every way in is held to
+            where = f"{self.id}: case fact '{f.get('id')}'"
+            if not isinstance(f, dict) or not str(f.get("id") or "").replace("_", "").isalnum():
+                raise ProfileError(f"{self.id}: a case fact needs an id of letters, digits and underscores")
+            if f.get("type", "text") not in ("text", "date", "money", "number"):
+                raise ProfileError(f"{where} is text, date, money or number, not '{f.get('type')}'")
+            options = f.get("options")
+            if options is not None and (not isinstance(options, list) or not options or any(not str(o).strip() for o in options)):
+                raise ProfileError(f"{where}: options is a list of the values it can take")
+            if options and f.get("default") not in (None, "") and str(f["default"]) not in [str(o) for o in options]:
+                raise ProfileError(f"{where}: its default is not one of its options")
+            currencies = f.get("currencies")
+            if currencies is not None:
+                from . import values
+
+                if f.get("type") != "money" or not isinstance(currencies, list) or not currencies or any(str(c).upper() not in values.CURRENCIES for c in currencies):
+                    raise ProfileError(f"{where}: currencies is a list of currency codes, on an amount")
         known = set(self.types)
         for ev in self.evidence:
             unknown = [t for t in ev.get("any_of") or [] if t not in known]
@@ -168,10 +185,23 @@ class Profile:
         f = self.field(head, fld)
         return f"{self.type_name(head)} · {(f or {}).get('name') or fld}"
 
+    def case_fields(self) -> list[dict[str, Any]]:
+        """The case facts as a form or another system needs them: whether each is mandatory, the choices it is one of, the currencies an amount takes."""
+        from .casefile import DEFAULT_CURRENCIES
+
+        out = []
+        for f in self.case.get("fields") or []:
+            row = {"id": f["id"], "name": f.get("name") or f["id"], "type": f.get("type", "text"), "required": bool(f.get("required")), **({"default": f["default"]} if f.get("default") not in (None, "") else {}),
+                   **({"description": f["description"]} if f.get("description") else {}), **({"options": [str(o) for o in f["options"]]} if f.get("options") else {})}
+            if row["type"] == "money":
+                row["currencies"] = [str(c).upper() for c in f.get("currencies") or DEFAULT_CURRENCIES]
+            out.append(row)
+        return out
+
     def summary(self) -> dict[str, Any]:
         return {"id": self.id, "name": self.name, "version": self.version, "description": self.description, "brand": self.brand, "sector": self.sector, "plain": self.plain,
                 "memory": self.memory, "service": self.service, "assurance": self._assurance(), "consistency": [{"id": r["id"], "title": r.get("title"), "kind": r.get("kind")} for r in self.consistency],
-                "case": self.case, "document_types": [{"id": t["id"], "name": t.get("name") or t["id"], "group": t.get("group") or "",
+                "case": {**self.case, "fields": self.case_fields()}, "document_types": [{"id": t["id"], "name": t.get("name") or t["id"], "group": t.get("group") or "",
                                                        "fields": [{"id": f["id"], "name": f.get("name") or f["id"], "type": f.get("type", "text"),
                                                                    "required": bool(f.get("required"))} for f in t.get("fields") or []]}
                                                       for t in self.types.values()],

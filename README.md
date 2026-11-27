@@ -62,7 +62,8 @@ contracts) and Governance (contracts, memory, provenance, throttling, watchlists
 an installation makes the product its own: **Observability** (what the agents did and what it cost), **Rules** (read,
 change, add, switch off and test the rules of a use case, or download the rules sheet, fill it in and import it; every
 change is a version in the audit trail) and **Connectors** (where cases come in, the systems of record they are
-checked against, and where the answer goes).
+checked against, and where the answer goes). Under the top bar on every screen runs the **live meter**: what the model
+has cost today and in all, and the case in front of you, moving with each call while a case is assessed.
 Inside a case: summary, documents, evidence, consistency, **screening, integrity and privacy**, rules, the graph,
 provenance, the what-if simulator, the decision with its printable record, and **Agent orchestration**: one board
 that shows the boss agent's plan, each agent run under its contract, and what every step took from the knowledge
